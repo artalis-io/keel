@@ -403,7 +403,7 @@ static kl_ssize_t mock_body_read_error(char *buf, size_t buf_len, void *user_dat
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 /* Server handler: echo body back */
@@ -473,7 +473,7 @@ static void start_stream_server(void)
                     kl_http_body_reader_buffer);
     kl_plat_thread_create(&stream_test_tid, stream_server_thread, NULL);
     wait_for_bind(&stream_test_server);
-    stream_test_port = stream_test_server.bound_port;
+    stream_test_port = kl_http_server_bound_port(&stream_test_server);
 }
 
 static void stop_stream_server(void)

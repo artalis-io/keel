@@ -38,6 +38,7 @@
 #endif   /* MSVC has no <unistd.h>; usleep replaced by kl_test_sleep_ms */
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "net_compat.h"
+#include "atomic_flags.h"    /* accept_fail / accept_calls cross the server and test threads */
 
 /* ── A provider whose io_status is caller-programmed and NEVER reads errno ──
  * Its send/recv/connect all return -1 without setting errno; classification is
@@ -198,9 +199,9 @@ UTEST(iostatus, async_client_consults_io_status_end_to_end) {
     kl_http_server_route(&srv, "GET", "/ok", iod_handler, NULL, NULL);
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, iod_server_thread, &srv));
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    ASSERT_GT(srv.bound_port, 0);
-    g_iod_port = srv.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
+    ASSERT_GT(kl_http_server_bound_port(&srv), 0);
+    g_iod_port = kl_http_server_bound_port(&srv);
 
     KlSocketProvider cprov = { &IOD_OPS, &g_cdeco, KL_SOCK_CAP_NATIVE_FD, NULL };
     KlAllocator a = kl_allocator_default();
@@ -262,8 +263,8 @@ static struct {
     int        forced;          /* the last call was a forced failure: report `status` */
     int        poison_connect;  /* connect reports pending through io_status only */
     int        spurious_reads;  /* recv calls still to fail as would-block before delegating */
-    volatile int accept_fail;   /* accept fails as resource-exhausted while set */
-    volatile int accept_calls;  /* accept calls while accept_fail was set */
+    int        accept_fail;     /* accept fails as resource-exhausted while set (atomic) */
+    int        accept_calls;    /* accept calls while accept_fail was set (atomic) */
 } g_pz;
 
 static void pz_fail(KlIoStatus st) {
@@ -297,8 +298,8 @@ static kl_ssize_t pz_send(void *c, KlSocketHandle fd, const void *b, size_t n) {
 }
 static KlSocketHandle pz_accept(void *c, KlSocketHandle fd, KlSockAddr *peer) {
     (void)c;
-    if (g_pz.accept_fail) {
-        g_pz.accept_calls++;
+    if (T_LOAD(g_pz.accept_fail)) {
+        T_INC(g_pz.accept_calls);
         pz_fail(KL_IO_RESOURCE_EXHAUSTED);
         return KL_INVALID_SOCKET;
     }
@@ -497,10 +498,10 @@ UTEST(iostatus, accept_loop_backs_off_on_provider_resource_exhausted) {
     kl_http_server_route(&g_pz_srv, "GET", "/ok", iod_handler, NULL, NULL);
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, pz_srv_thread, &g_pz_srv));
-    for (int i = 0; i < 200 && g_pz_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    int port = g_pz_srv.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_pz_srv) == 0; i++) kl_test_sleep_ms(10);
+    int port = kl_http_server_bound_port(&g_pz_srv);
 
-    g_pz.accept_fail = 1;
+    T_STORE(g_pz.accept_fail, 1);
     KlSocketHandle cfd = (KlSocketHandle)socket(AF_INET, SOCK_STREAM, 0);
     int connected = -1;
     if (port > 0 && kl_handle_valid(cfd)) {
@@ -512,8 +513,8 @@ UTEST(iostatus, accept_loop_backs_off_on_provider_resource_exhausted) {
         connected = connect((int)cfd, (struct sockaddr *)&sa, sizeof(sa));
     }
     kl_test_sleep_ms(400);              /* every accept fails meanwhile */
-    int calls = g_pz.accept_calls;
-    g_pz.accept_fail = 0;               /* resources are back: the queued connection is served */
+    int calls = T_LOAD(g_pz.accept_calls);
+    T_STORE(g_pz.accept_fail, 0);              /* resources are back: the queued connection is served */
 
     char buf[256];
     long got = -1;

@@ -122,13 +122,13 @@ UTEST(event_provider, server_runs_on_injected_backend) {
 
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, epp_thread, NULL));
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) epp_nap(5);
-    ASSERT_TRUE(g_srv.bound_port > 0);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_srv) == 0; i++) epp_nap(5);
+    ASSERT_TRUE(kl_http_server_bound_port(&g_srv) > 0);
 
     int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     ASSERT_TRUE(fd >= 0);
     struct sockaddr_in a; memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET; a.sin_port = htons((uint16_t)g_srv.bound_port);
+    a.sin_family = AF_INET; a.sin_port = htons((uint16_t)kl_http_server_bound_port(&g_srv));
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
     ASSERT_EQ(0, connect(fd, (struct sockaddr *)&a, sizeof(a)));
     const char *req = "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -142,15 +142,15 @@ UTEST(event_provider, server_runs_on_injected_backend) {
         got += (size_t)n; buf[got] = 0;
         if (strstr(buf, "\r\n\r\n")) break;
     }
-    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
-    ASSERT_TRUE(strstr(buf, "\"backend\":\"custom\"") != NULL);
-    ASSERT_EQ(1, g_handler_called);
-    ASSERT_TRUE(ep_wait_calls > 0);   /* the injected backend actually drove the loop */
-
     kl_test_closesock(fd);
     kl_http_server_stop(&g_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&g_srv);
+    /* The loop thread's counters, read after the join. */
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "\"backend\":\"custom\"") != NULL);
+    ASSERT_EQ(1, g_handler_called);
+    ASSERT_TRUE(ep_wait_calls > 0);   /* the injected backend actually drove the loop */
 }
 
 UTEST_MAIN();

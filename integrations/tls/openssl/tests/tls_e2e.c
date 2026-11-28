@@ -22,6 +22,7 @@
 
 #include <keel_tls_openssl.h>
 #include <keel/allocator.h>
+#include <keel/socket.h>
 
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -1614,6 +1615,208 @@ static void test_obsolete_protocol_rejected(KlAllocator *alloc, PemPair *server)
 #endif
 }
 
+/* ── A provider that reports failures only through io_status ─────── */
+
+/* A readiness socket provider with no hosted errno, as a freestanding stack has: each failure is
+ * reported only through its io_status op, and errno is left holding an unrelated value (EIO). It
+ * also injects failures ahead of the real I/O: a would-block on every fourth call from the second,
+ * and an interrupted call on every fourth from the fourth. The BIO must take its classification
+ * from the provider: a would-block retried later, an interrupted call retried at once. Reading
+ * errno instead would see EIO and fail the session. */
+static unsigned   g_np_calls, g_np_wouldblock, g_np_interrupted;
+static KlIoStatus g_np_last;
+
+/* What the provider does instead of the injection pattern above. */
+enum { NP_MIXED, NP_PASS, NP_INTERRUPTED_N, NP_INTERRUPTED_FOREVER, NP_FATAL, NP_EOF };
+static int g_np_mode = NP_MIXED;
+static int g_np_intr_left;   /* NP_INTERRUPTED_N: calls still to interrupt, then pass through */
+
+/* 1: fail this call (-1, status in g_np_last); 2: report EOF (0); 0: do the real I/O. */
+static int np_inject(void) {
+    unsigned c = g_np_calls++;
+    switch (g_np_mode) {
+    case NP_PASS:
+        return 0;
+    case NP_INTERRUPTED_N:
+        if (g_np_intr_left <= 0) return 0;
+        g_np_intr_left--;
+        g_np_last = KL_IO_INTERRUPTED; g_np_interrupted++; errno = EIO; return 1;
+    case NP_INTERRUPTED_FOREVER:
+        g_np_last = KL_IO_INTERRUPTED; g_np_interrupted++; errno = EIO; return 1;
+    case NP_FATAL:                     /* errno says "retry": only io_status may decide */
+        g_np_last = KL_IO_FATAL; errno = EAGAIN; return 1;
+    case NP_EOF:
+        return 2;
+    default:
+        break;
+    }
+    if (c % 4 == 1) { g_np_last = KL_IO_WOULD_BLOCK; g_np_wouldblock++; errno = EIO; return 1; }
+    if (c % 4 == 3) { g_np_last = KL_IO_INTERRUPTED; g_np_interrupted++; errno = EIO; return 1; }
+    return 0;
+}
+static void np_classify(void) {
+    g_np_last = (errno == EAGAIN || errno == EWOULDBLOCK) ? KL_IO_WOULD_BLOCK
+              : errno == EINTR ? KL_IO_INTERRUPTED : KL_IO_FATAL;
+    errno = EIO;
+}
+static kl_ssize_t np_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+    (void)ctx;
+    int inj = np_inject();
+    if (inj == 1) return -1;
+    if (inj == 2) { g_np_last = KL_IO_CLOSED; errno = EPIPE; return -1; }   /* peer gone */
+    kl_ssize_t r = send((int)(intptr_t)fd, buf, len, 0);
+    if (r < 0) np_classify();
+    return r;
+}
+static kl_ssize_t np_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
+    (void)ctx;
+    int inj = np_inject();
+    if (inj == 1) return -1;
+    if (inj == 2) return 0;                                                 /* bare EOF */
+    kl_ssize_t r = recv((int)(intptr_t)fd, buf, len, 0);
+    if (r < 0) np_classify();
+    return r;
+}
+static KlIoStatus np_io_status(void *ctx) { (void)ctx; return g_np_last; }
+static const KlSocketOps g_np_ops = {
+    .send = np_send, .recv = np_recv, .io_status = np_io_status, .name = "io-status-only",
+};
+
+static void test_provider_io_status_classifies(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== readiness BIO: would-block / interrupted come from the provider's io_status ==\n");
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+    KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+    KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+
+    KlSocketProvider prov;
+    memset(&prov, 0, sizeof prov);
+    prov.ops = &g_np_ops;
+    assert(srv->set_socket_provider && cli->set_socket_provider);
+    srv->set_socket_provider(srv, &prov);
+    cli->set_socket_provider(cli, &prov);
+
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    g_np_calls = g_np_wouldblock = g_np_interrupted = 0;
+    assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
+    roundtrip(cli, fds[0], srv, fds[1], "through an io_status-only provider");
+    roundtrip(srv, fds[1], cli, fds[0], "and back");
+    printf("  injected: %u would-block, %u interrupted (of %u calls)\n",
+           g_np_wouldblock, g_np_interrupted, g_np_calls);
+    assert(g_np_wouldblock > 0 && g_np_interrupted > 0);
+    printf("  PASS: handshake + round-trip classified by io_status, errno never consulted\n");
+
+    char b[64];
+    /* Interrupted ten times, then fine: each call is retried at once inside the BIO, so the read
+     * returns the data already waiting and the write goes out, in one call each, with no further
+     * readiness event (Keel's readiness loops are edge-triggered: a WANT_* here would wait for an
+     * edge that never comes). */
+    g_np_mode = NP_PASS;
+    assert(srv->write(srv, fds[1], "ping", 4) == 4);
+    g_np_mode = NP_INTERRUPTED_N;
+    g_np_intr_left = 10;
+    g_np_interrupted = 0;
+    kl_ssize_t rr = cli->read(cli, fds[0], b, sizeof b);
+    unsigned read_intr = g_np_interrupted;
+    g_np_intr_left = 10;
+    g_np_interrupted = 0;
+    kl_ssize_t wr = cli->write(cli, fds[0], "pong", 4);
+    unsigned write_intr = g_np_interrupted;
+    g_np_mode = NP_PASS;
+    printf("  interrupted 10 times: read=%zd (%u interruptions), write=%zd (%u interruptions)\n",
+           (ssize_t)rr, read_intr, (ssize_t)wr, write_intr);
+    assert(rr == 4 && memcmp(b, "ping", 4) == 0 && read_intr == 10);
+    assert(wr == 4 && write_intr == 10);
+    size_t pg = 0;
+    for (int i = 0; i < 50 && pg < 4; i++) {
+        kl_ssize_t n = srv->read(srv, fds[1], b + pg, sizeof b - pg);
+        if (n > 0) pg += (size_t)n;
+    }
+    assert(pg == 4 && memcmp(b, "pong", 4) == 0);
+    g_np_mode = NP_MIXED;
+    printf("  PASS: interrupted calls are retried at once; the operation completes in the same call\n");
+
+    cli->destroy(cli);
+    srv->destroy(srv);
+    close(fds[0]);
+    close(fds[1]);
+
+    /* The rest on a fresh pair each, through the same provider:
+     *   close_notify then the transport's EOF: a clean close (read -1, at_eof 1);
+     *   a bare EOF (recv 0, no close_notify): a truncation (read -1, at_eof 0);
+     *   KL_IO_FATAL with errno reading EAGAIN: read and write fail (-1), errno ignored;
+     *   a provider interrupted forever: the read, and the write, fail (-1) after exactly
+     *   KL_TLS_BIO_EINTR_RETRIES (16) immediate attempts: no spin, no wait for an edge. */
+    enum { C_NOTIFY, C_BARE, C_FATAL, C_INTR_READ, C_INTR_WRITE, C_COUNT };
+    static const char *const cname[C_COUNT] = { "close_notify", "bare EOF", "fatal",
+                                                "interrupted forever (read)",
+                                                "interrupted forever (write)" };
+    for (int c = 0; c < C_COUNT; c++) {
+        g_np_mode = NP_MIXED;
+        srv = kl_tls_openssl_create(sctx, alloc);
+        cli = kl_tls_openssl_create(cctx, alloc);
+        assert(srv && cli);
+        assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+        srv->set_socket_provider(srv, &prov);
+        cli->set_socket_provider(cli, &prov);
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+        assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
+        roundtrip(srv, fds[1], cli, fds[0], "before the case");
+        kl_ssize_t n = 0;
+        int eof = 0;
+        unsigned calls = 0;
+        if (c == C_NOTIFY) {
+            for (int i = 0; i < 20 && srv->shutdown(srv, fds[1]) != KL_TLS_OK; i++) { }
+            shutdown(fds[1], SHUT_WR);
+            for (int i = 0; i < 50 && (n = cli->read(cli, fds[0], b, sizeof b)) == 0; i++) { }
+            eof = cli->at_eof(cli);
+            assert(n == -1 && eof == 1);
+        } else if (c == C_BARE) {
+            g_np_mode = NP_EOF;
+            for (int i = 0; i < 50 && (n = cli->read(cli, fds[0], b, sizeof b)) == 0; i++) { }
+            eof = cli->at_eof(cli);
+            assert(n == -1 && eof == 0);
+        } else if (c == C_FATAL) {
+            g_np_mode = NP_FATAL;
+            n = cli->read(cli, fds[0], b, sizeof b);
+            assert(n == -1 && !cli->at_eof(cli));
+            kl_ssize_t w2 = cli->write(cli, fds[0], "x", 1);
+            assert(w2 == -1);
+        } else {
+            g_np_mode = NP_INTERRUPTED_FOREVER;
+            g_np_calls = 0;
+            n = c == C_INTR_READ ? cli->read(cli, fds[0], b, sizeof b)
+                                 : cli->write(cli, fds[0], "x", 1);
+            calls = g_np_calls;
+            assert(n == -1 && calls == 16);
+        }
+        g_np_mode = NP_MIXED;
+        if (c >= C_INTR_READ)
+            printf("  %s: result %zd, provider calls %u\n", cname[c], (ssize_t)n, calls);
+        else
+            printf("  %s: result %zd, at_eof %d\n", cname[c], (ssize_t)n, eof);
+        cli->destroy(cli);
+        srv->destroy(srv);
+        close(fds[0]);
+        close(fds[1]);
+    }
+    printf("  PASS: clean and bare EOF, fatal, and a provider interrupted forever classify as before\n");
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+}
+
 int main(void) {
     srand(1234);
     KlAllocator alloc = kl_allocator_default();
@@ -1652,6 +1855,7 @@ int main(void) {
     test_error_queue_discipline(&alloc, &ca, &server);
     test_comp_large_write(&alloc, &ca, &server);
     test_drain_style_retry(&alloc, &ca, &server);
+    test_provider_io_status_classifies(&alloc, &ca, &server);
 
     EVP_PKEY_free(ca_key);
     X509_free(ca_crt);

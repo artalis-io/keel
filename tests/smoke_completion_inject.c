@@ -68,7 +68,7 @@ int main(void) {
         kl_http_server_free(&g_srv);
         return 1;
     }
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) nap_ms(5);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_srv) == 0; i++) nap_ms(5);
 
     KlAllocator alloc = kl_allocator_default();
     KlHttpClientConfig ccfg = { .timeout_ms = 1000, .max_response_size = 256 * 1024 };

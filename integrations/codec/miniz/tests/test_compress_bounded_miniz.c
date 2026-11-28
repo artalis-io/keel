@@ -56,6 +56,7 @@ static int infl_init(Inflater *f) {
 }
 /* Decode everything in `d`; returns 0, or -1 on a decode error. */
 static int infl_feed(Inflater *f, const char *d, size_t n) {
+    if (!d) d = "";       /* an empty Buf: no arithmetic on NULL here or inside mz_inflate */
     size_t s = n < f->skip ? n : f->skip;
     f->skip -= s;
     d += s;

@@ -4,7 +4,10 @@
 #include <keel/keel.h>
 #include "socket.h"   /* internal: exercise the socket-provider seam */
 #include "event_caps.h"   /* internal: kl_event_caps (which event model the server got) */
+#include "event_builtin.h"   /* the built-in backend, wrapped below so registering the listener fails */
+#include "completion.h"   /* kl_comp_ops_builtin: the built-in completion table, wrapped below */
 #include "net_compat.h"
+#include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -151,7 +154,7 @@ static kl_ssize_t read_one_response(int fd, char *buf, size_t buflen, int timeou
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 /* ── Pool exhaustion ────────────────────────────────────────────────── */
@@ -165,11 +168,13 @@ UTEST(server_integration, pool_exhaustion_rejects) {
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
 
+    KlTestStatsProbe probe;
+    ASSERT_EQ(0, kl_test_stats_probe_init(&probe, &srv));
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     /* Fill pool (2 connections) */
     int fd1 = connect_to(port);
@@ -182,7 +187,7 @@ UTEST(server_integration, pool_exhaustion_rejects) {
 
     /* Stats must reflect the readiness listener's PAUSED state when the pool is full. */
     KlHttpServerStats st_full;
-    kl_http_server_stats(&srv, &st_full);
+    ASSERT_EQ(0, kl_test_stats_probe_get(&probe, &st_full));
     ASSERT_EQ(st_full.active_connections, 2);
     ASSERT_EQ(st_full.listen_paused, 1);
 
@@ -221,6 +226,7 @@ UTEST(server_integration, pool_exhaustion_rejects) {
 
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&tid);
+    kl_test_stats_probe_free(&probe);
     kl_http_server_free(&srv);
 }
 
@@ -232,18 +238,21 @@ UTEST(server_integration, teardown_while_armed) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 4 };
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlTestStatsProbe probe;
+    ASSERT_EQ(0, kl_test_stats_probe_init(&probe, &srv));
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
     /* No connections → listener LISTENING (armed). */
     KlHttpServerStats st;
-    kl_http_server_stats(&srv, &st);
+    ASSERT_EQ(0, kl_test_stats_probe_get(&probe, &st));
     ASSERT_EQ(st.listen_paused, 0);
 
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&tid);
+    kl_test_stats_probe_free(&probe);
     kl_http_server_free(&srv);   /* must close+detach the armed listener cleanly */
 }
 
@@ -252,22 +261,25 @@ UTEST(server_integration, teardown_while_paused) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 1 };
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
     kl_http_server_route(&srv, "GET", "/hello", handle_hello, NULL, NULL);
+    KlTestStatsProbe probe;
+    ASSERT_EQ(0, kl_test_stats_probe_init(&probe, &srv));
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    int port = srv.bound_port;
+    int port = kl_http_server_bound_port(&srv);
 
     int fd1 = connect_to(port);     /* fills the single slot */
     int fd2 = connect_nb(port);     /* backlog; listener PAUSED */
     kl_test_sleep_ms(50);
     KlHttpServerStats st;
-    kl_http_server_stats(&srv, &st);
+    ASSERT_EQ(0, kl_test_stats_probe_get(&probe, &st));
     ASSERT_EQ(st.listen_paused, 1);
 
     /* Free the server while the listener is PAUSED with a held reservation dropped and interest
      * disarmed: the close/detachment contract must complete. */
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&tid);
+    kl_test_stats_probe_free(&probe);
     kl_http_server_free(&srv);
     if (fd1 >= 0) kl_test_closesock(fd1);
     if (fd2 >= 0) kl_test_closesock(fd2);
@@ -287,8 +299,8 @@ UTEST(server_integration, backpressure_recovery) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     /* Fill pool */
     int fd1 = connect_to(port);
@@ -345,8 +357,8 @@ UTEST(server_integration, keep_alive_pipeline) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -392,8 +404,8 @@ UTEST(server_integration, drain_completes_inflight) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     /* Start a request to the slow handler */
     int fd = connect_to(port);
@@ -433,8 +445,8 @@ UTEST(server_integration, drain_deadline_forces_exit) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     /* Open connections but don't send complete requests: they stay in READING */
     int fd1 = connect_to(port);
@@ -473,8 +485,8 @@ UTEST(server_integration, concurrent_requests) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     int fds[4];
     for (int i = 0; i < 4; i++) {
@@ -526,8 +538,8 @@ UTEST(server_integration, explicit_posix_provider_roundtrip) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -612,8 +624,8 @@ UTEST(server_integration, serialized_writev_fallback) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -668,8 +680,8 @@ UTEST(server_integration, sendfile_fallback) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
-    int port = srv.bound_port;
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
+    int port = kl_http_server_bound_port(&srv);
 
     int fd = connect_to(port);
     ASSERT_TRUE(fd >= 0);
@@ -721,9 +733,9 @@ UTEST(server_integration, sendfile_large_file_to_a_slow_reader) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
-    int fd = connect_to(srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&srv));
     ASSERT_TRUE(fd >= 0);
     const char *req = "GET /file HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
     ASSERT_TRUE(kl_test_sockwrite(fd, req, strlen(req)) > 0);
@@ -780,9 +792,9 @@ UTEST(server_integration, file_shorter_than_its_length_closes_the_connection) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
 
-    int fd = connect_to(srv.bound_port);
+    int fd = connect_to(kl_http_server_bound_port(&srv));
     ASSERT_TRUE(fd >= 0);
     const char *req = "GET /shrunk HTTP/1.1\r\nHost: localhost\r\n\r\n";   /* keep-alive */
     ASSERT_TRUE(kl_test_sockwrite(fd, req, strlen(req)) > 0);
@@ -808,7 +820,7 @@ UTEST(server_integration, file_shorter_than_its_length_closes_the_connection) {
  * join hung forever (seen once on CI, in teardown_while_armed). The log callback runs on the server
  * thread inside that window, so it can stop the server at exactly that point. */
 static KlHttpServer stop_early_srv;
-static volatile int stop_early_returned;
+static int stop_early_returned;   /* set by the server thread, polled here: kl_atomic.h */
 static void stop_in_listening_log(int level, const char *fmt, va_list ap, void *ud) {
     (void)level; (void)ap;
     if (strncmp(fmt, "listening", 9) == 0)
@@ -817,7 +829,7 @@ static void stop_in_listening_log(int level, const char *fmt, va_list ap, void *
 static void stop_early_thread(void *arg) {
     (void)arg;
     kl_http_server_run(&stop_early_srv);
-    stop_early_returned = 1;
+    kl_atomic_store_int(&stop_early_returned, 1);
 }
 
 UTEST(server_integration, stop_during_startup_is_not_lost) {
@@ -827,8 +839,8 @@ UTEST(server_integration, stop_during_startup_is_not_lost) {
     stop_early_returned = 0;
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, stop_early_thread, NULL));
-    for (int i = 0; i < 200 && !stop_early_returned; i++) kl_test_sleep_ms(10);
-    int returned = stop_early_returned;
+    for (int i = 0; i < 200 && !kl_atomic_load_int(&stop_early_returned); i++) kl_test_sleep_ms(10);
+    int returned = kl_atomic_load_int(&stop_early_returned);
     if (!returned) kl_http_server_stop(&stop_early_srv);   /* rescue, so a failure does not hang */
     kl_plat_thread_join(&tid);
     kl_http_server_free(&stop_early_srv);
@@ -848,6 +860,91 @@ UTEST(server_integration, a_failed_start_leaves_running_clear) {
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(running, 0);                         /* was 1 */
 }
+
+/* The port is published only once startup has succeeded: a run whose start fails after the bind
+ * (here the loop refuses to register the listen socket, the one registration made with no udata)
+ * returns -1 and leaves kl_http_server_bound_port at 0, so a thread polling it never sees a port
+ * for a server that never started. */
+static int refuse_listener_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask mask, void *udata) {
+    if (udata == NULL) return -1;                  /* the listen socket */
+    return kl_event_add_builtin(l, fd, mask, udata);
+}
+static const KlEventOps refuse_listener_ops = {
+    kl_event_init_builtin, refuse_listener_add, kl_event_mod_builtin, kl_event_del_builtin,
+    kl_event_wait_builtin, kl_event_close_builtin, kl_event_caps_builtin,
+    kl_event_native_provider_builtin, NULL,
+};
+static const KlEventProvider refuse_listener_provider = { &refuse_listener_ops, "refuse-listener" };
+
+UTEST(server_integration, a_start_that_fails_after_the_bind_publishes_no_port) {
+    /* The wrapper offers no completion ops, so it needs a readiness built-in backend. The ordering
+     * it checks (publish after every startup step) is shared by the completion path. */
+    KlEventLoop probe;
+    memset(&probe, 0, sizeof probe);
+    KlAllocator a = kl_allocator_default();
+    probe.alloc = &a;
+    if (kl_event_init(&probe) != 0) UTEST_SKIP("no event loop");
+    unsigned caps = kl_event_caps(&probe);
+    kl_event_close(&probe);
+    if (caps & KL_EVENT_CAP_COMPLETION) UTEST_SKIP("readiness only: the wrapper has no completion ops");
+    static KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1",
+                               .event_provider = &refuse_listener_provider };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    int rc = kl_http_server_run(&srv);
+    int port = kl_http_server_bound_port(&srv);
+    KlError err = srv.last_error;
+    kl_http_server_free(&srv);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(err, KL_ERR_EVENT_ADD);              /* it got past bind and listen */
+    ASSERT_EQ(port, 0);                            /* was the bound port: published at the bind */
+}
+
+#ifndef KEEL_NO_COMPLETION   /* kl_comp_ops_builtin exists only with the completion axis */
+/* The same on a completion loop, whose accept path is set up after the listener is registered:
+ * the backend's accept priming fails (as IOCP's does when the AcceptEx lookup fails), so the run
+ * returns -1 and the port stays 0. The built-in completion backend's table, with prime_accepts
+ * refusing. Completion builds only (pollcomp, io_uring, IOCP). */
+static KlCompletionOps g_refuse_prime_comp;
+static int refuse_prime(struct KlEventCtx *ctx, KlSocketHandle listen_fd) {
+    (void)ctx; (void)listen_fd;
+    return -1;
+}
+static KlEventOps g_refuse_prime_ops;
+static KlEventProvider g_refuse_prime_provider;
+
+UTEST(server_integration, a_completion_start_whose_accept_setup_fails_publishes_no_port) {
+    KlEventLoop probe;
+    memset(&probe, 0, sizeof probe);
+    KlAllocator a = kl_allocator_default();
+    probe.alloc = &a;
+    if (kl_event_init(&probe) != 0) UTEST_SKIP("no event loop");
+    unsigned caps = kl_event_caps(&probe);
+    kl_event_close(&probe);
+    if (!(caps & KL_EVENT_CAP_COMPLETION) || !kl_comp_ops_builtin())
+        UTEST_SKIP("completion builds only");
+    g_refuse_prime_comp = *kl_comp_ops_builtin();
+    g_refuse_prime_comp.prime_accepts = refuse_prime;
+    const KlEventOps ops = {
+        kl_event_init_builtin, kl_event_add_builtin, kl_event_mod_builtin, kl_event_del_builtin,
+        kl_event_wait_builtin, kl_event_close_builtin, kl_event_caps_builtin,
+        kl_event_native_provider_builtin, &g_refuse_prime_comp,
+    };
+    g_refuse_prime_ops = ops;
+    g_refuse_prime_provider.ops = &g_refuse_prime_ops;
+    g_refuse_prime_provider.name = "refuse-prime";
+
+    static KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1",
+                               .event_provider = &g_refuse_prime_provider };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    int rc = kl_http_server_run(&srv);
+    int port = kl_http_server_bound_port(&srv);
+    kl_http_server_free(&srv);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(port, 0);                            /* was the bound port: published before the setup */
+}
+#endif /* !KEEL_NO_COMPLETION */
 
 /* A long download that keeps moving is not an idle connection. On a completion loop a buffered
  * response is one send op until all of it is out (the engine re-posts partial sends itself), and the
@@ -881,7 +978,7 @@ UTEST(server_integration, a_long_steady_download_is_not_timed_out) {
     if (fd >= 0) {
         int rcv = 16 * 1024;
         (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof rcv);
-        struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons((uint16_t)ld_srv.bound_port) };
+        struct sockaddr_in addr = { .sin_family = AF_INET, .sin_port = htons((uint16_t)kl_http_server_bound_port(&ld_srv)) };
         inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
         if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
             const char *rq = "GET /dl HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
@@ -933,7 +1030,7 @@ UTEST(server_integration, no_new_connection_is_served_while_draining) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    int port = srv.bound_port;
+    int port = kl_http_server_bound_port(&srv);
 
     int keep = connect_to(port);                           /* idle: keeps the drain open */
     char buf[1024];
@@ -981,7 +1078,7 @@ static uint64_t drain_srv_start(KlHttpServer *srv, KlPlatThread *tid, int drain_
     kl_http_server_route(srv, "GET", "/own", handle_own_conn, NULL, NULL);
     kl_plat_thread_create(tid, server_thread_fn, srv);
     wait_for_bind(srv);
-    return (uint64_t)srv->bound_port;
+    return (uint64_t)kl_http_server_bound_port(srv);
 }
 
 UTEST(server_integration, a_drain_refuses_new_connections_and_does_not_spin) {
@@ -1163,11 +1260,11 @@ UTEST(server_integration, a_second_run_is_refused_and_opens_no_listener) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &srv);
     wait_for_bind(&srv);
-    ASSERT_TRUE(srv.bound_port > 0);
+    ASSERT_TRUE(kl_http_server_bound_port(&srv) > 0);
     kl_http_server_stop(&srv);                                   /* no drain: listener kept until free */
     kl_plat_thread_join(&tid);
     KlSocketHandle first_listener = srv.listen_fd;
-    int first_port = srv.bound_port;
+    int first_port = kl_http_server_bound_port(&srv);
 
     RerunArg r = { &srv, -2, 0 };
     kl_plat_thread_create(&tid, rerun_thread_fn, &r);
@@ -1181,7 +1278,7 @@ UTEST(server_integration, a_second_run_is_refused_and_opens_no_listener) {
     EXPECT_EQ(-1, r.rc);
     EXPECT_EQ(KL_ERR_INVALID_ARG, srv.last_error);
     EXPECT_TRUE(second_listener == first_listener);              /* no new listener was opened */
-    EXPECT_EQ(first_port, srv.bound_port);
+    EXPECT_EQ(first_port, kl_http_server_bound_port(&srv));
     EXPECT_EQ(0, kl_http_server_draining(&srv));
     kl_http_server_free(&srv);
 }
@@ -1203,7 +1300,7 @@ static void early_stop_case(int *utest_result, int drain_ms) {
     kl_plat_thread_join(&tid);
     EXPECT_TRUE(returned);
     EXPECT_EQ(0, r.rc);
-    EXPECT_EQ(0, srv.bound_port);                                /* never bound */
+    EXPECT_EQ(0, kl_http_server_bound_port(&srv));                                /* never bound */
     EXPECT_EQ(0, kl_http_server_draining(&srv));
     kl_http_server_free(&srv);
 }

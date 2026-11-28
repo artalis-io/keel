@@ -16,6 +16,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include "net_compat.h"
+#include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
 #include <string.h>
 #include <stdio.h>
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
@@ -94,6 +95,7 @@ static int rd_deny_mw(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 
 /* Defined below; rd_start() calls it to clean up after a test that returned early. */
 static void rd_stop(void);
+static KlTestStatsProbe rd_probe;   /* rd_server's stats, read from the test thread */
 
 static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
     /* Tear down anything a PREVIOUS test left running, before touching the shared statics.
@@ -125,10 +127,11 @@ static int rd_start(size_t drain_bytes, uint32_t drain_ms) {
                          (void *)(size_t)1024, kl_http_body_reader_buffer);  /* a 1 KiB reader */
     kl_http_server_route_streaming(&rd_server, "POST", "/early", rd_early_handler, NULL,
                                    rd_early_factory);
+    if (kl_test_stats_probe_init(&rd_probe, &rd_server) != 0) return -1;
     if (kl_plat_thread_create(&rd_tid, rd_thread, NULL) != 0) return -1;
     rd_live = 1;
-    for (int i = 0; i < 400 && rd_server.bound_port == 0; i++) kl_test_sleep_ms(5);
-    rd_port = rd_server.bound_port;
+    for (int i = 0; i < 400 && kl_http_server_bound_port(&rd_server) == 0; i++) kl_test_sleep_ms(5);
+    rd_port = kl_http_server_bound_port(&rd_server);
     return (rd_port > 0) ? 0 : -1;
 }
 
@@ -137,6 +140,7 @@ static void rd_stop(void) {
     kl_http_server_stop(&rd_server);
     kl_plat_thread_join(&rd_tid);
     rd_live = 0;
+    kl_test_stats_probe_free(&rd_probe);
     kl_http_server_free(&rd_server);
 }
 
@@ -694,10 +698,10 @@ static void body_with_headers_case(int *utest_result, const char *path) {
     /* The client sees EOF at once either way (the drain half-closes); what differs is how long the
      * server holds the connection. Keep the client's end open and time the server's release. */
     uint64_t t0 = kl_monotonic_ms();
-    int active = -1;
+    int active = -1, probe_failed = 0;
     for (int i = 0; i < 300; i++) {
         KlHttpServerStats st;
-        kl_http_server_stats(&rd_server, &st);
+        if (kl_test_stats_probe_get(&rd_probe, &st) != 0) { probe_failed = 1; break; }
         active = st.active_connections;
         if (active == 0) break;
         kl_test_sleep_ms(10);
@@ -705,6 +709,7 @@ static void body_with_headers_case(int *utest_result, const char *path) {
     uint64_t elapsed = kl_monotonic_ms() - t0;
     kl_test_closesock(fd);
     rd_stop();
+    ASSERT_EQ(probe_failed, 0);                    /* the loop answered every probe */
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_EQ(active, 0);
     ASSERT_LT(elapsed, (uint64_t)1000);              /* was ~2000: drained to the deadline */
@@ -836,8 +841,8 @@ UTEST(reject_drain, a_drain_with_its_framing_complete_frees_the_slot) {
                          (void *)(size_t)(64 * 1024), kl_http_body_reader_buffer);
     KlPlatThread tid;
     ASSERT_EQ(0, kl_plat_thread_create(&tid, fr_thread, NULL));
-    for (int i = 0; i < 400 && fr_srv.bound_port == 0; i++) kl_test_sleep_ms(5);
-    rd_port = fr_srv.bound_port;
+    for (int i = 0; i < 400 && kl_http_server_bound_port(&fr_srv) == 0; i++) kl_test_sleep_ms(5);
+    rd_port = kl_http_server_bound_port(&fr_srv);
 
     int fd = rd_connect();
     if (fd >= 0) {

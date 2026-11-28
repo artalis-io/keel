@@ -841,6 +841,13 @@ static kl_ssize_t rx_consume(KlUefiConn *c, void *dst, size_t len) {
     return (kl_ssize_t)n;
 }
 
+/* A latched receive error ends the stream (recv reports it with errno EIO): the status it leaves
+ * for io_status must classify as a failure, never as a retry, whatever code the firmware used
+ * (a Receive that completed EFI_TIMEOUT would otherwise read as would-block). */
+static EFI_STATUS rx_err_status(EFI_STATUS st) {
+    return kl_efi_status_to_io(st) == KL_IO_WOULD_BLOCK ? EFI_ABORTED : st;
+}
+
 /*
  * recv(): NON-BLOCKING. Serves buffered data first; otherwise probes
  * readiness ONCE (kl_uefi_socket_recv_ready, which posts + polls a Receive
@@ -864,7 +871,7 @@ static kl_ssize_t efi_sock_recv(void *cx, KlSocketHandle fd, void *buf, size_t l
     /* 2. Sticky EOF / latched error. */
     if (c->rx_eof) { c->last_status = EFI_CONNECTION_FIN; return 0; }
     if (c->rx_err) {
-        c->last_status = c->rx_err;
+        c->last_status = rx_err_status(c->rx_err);
         c->rx_err = EFI_SUCCESS;   /* consume the latch */
         errno = EIO;
         return -1;
@@ -876,7 +883,7 @@ static kl_ssize_t efi_sock_recv(void *cx, KlSocketHandle fd, void *buf, size_t l
             return rx_consume(c, buf, len);
         if (c->rx_eof) { c->last_status = EFI_CONNECTION_FIN; return 0; }
         if (c->rx_err) {
-            c->last_status = c->rx_err;
+            c->last_status = rx_err_status(c->rx_err);
             c->rx_err = EFI_SUCCESS;
             errno = EIO;
             return -1;
@@ -1055,7 +1062,8 @@ static int efi_sock_get_local_addr(void *cx, KlSocketHandle fd, KlSockAddr *addr
     (void)cx;
     if (kl_uefi_after_ebs()) return -1;   /* fail-closed post-EBS */
     KlUefiConn *c = conn_of(fd);
-    if (!c || c->dead || !addr || !c->tcp) return -1;
+    if (!c || c->dead) return -1;          /* no live conn: the wrapper publishes EFI_ABORTED */
+    if (!addr || !c->tcp) { c->last_status = EFI_INVALID_PARAMETER; return -1; }
 
     EFI_TCP4_CONFIG_DATA mode;
     { unsigned char *p = (unsigned char *)&mode; for (size_t i = 0; i < sizeof(mode); i++) p[i] = 0; }
@@ -1306,22 +1314,30 @@ static KlSocketHandle w_socket(void *cx, int d, int t, int p) {
     g_last_ctx_status = c ? c->last_status : EFI_OUT_OF_RESOURCES;
     return h;
 }
+/* Publish the status io_status() reports for the op that just returned @r on @fd. Every failure
+ * publishes: one on a handle that is no live conn any more (never valid, closed, marked dead, which
+ * includes a send that quarantined its slot) or made after ExitBootServices is EFI_ABORTED (fatal),
+ * since the conn's own last_status is stale there or would read as retryable (a quarantining
+ * send's EFI_TIMEOUT). Leaving the previous op's status in place let a failure on a dead conn
+ * classify as whatever came before it (a would-block, say). */
+static void w_publish(KlSocketHandle fd, long r) {
+    KlUefiConn *c = conn_of(fd);
+    if (c && !kl_uefi_after_ebs()) g_last_ctx_status = c->last_status;
+    else if (r < 0)                g_last_ctx_status = EFI_ABORTED;
+}
 static int w_connect(void *cx, KlSocketHandle fd, const KlSockAddr *a) {
     int r = efi_sock_connect(cx, fd, a);
-    KlUefiConn *c = conn_of(fd);
-    if (c) g_last_ctx_status = c->last_status;
+    w_publish(fd, r);
     return r;
 }
 static kl_ssize_t w_send(void *cx, KlSocketHandle fd, const void *b, size_t n) {
     kl_ssize_t r = efi_sock_send(cx, fd, b, n);
-    KlUefiConn *c = conn_of(fd);
-    if (c) g_last_ctx_status = c->last_status;
+    w_publish(fd, (long)r);
     return r;
 }
 static kl_ssize_t w_recv(void *cx, KlSocketHandle fd, void *b, size_t n) {
     kl_ssize_t r = efi_sock_recv(cx, fd, b, n);
-    KlUefiConn *c = conn_of(fd);
-    if (c) g_last_ctx_status = c->last_status;
+    w_publish(fd, (long)r);
     return r;
 }
 static int w_get_local_addr(void *cx, KlSocketHandle fd, KlSockAddr *addr) {
@@ -1329,8 +1345,7 @@ static int w_get_local_addr(void *cx, KlSocketHandle fd, KlSockAddr *addr) {
     if (kl_efi_is_udp_handle(fd)) return kl_uefi_udp_get_local_addr(fd, addr);   /* unified: datagram */
 #endif
     int r = efi_sock_get_local_addr(cx, fd, addr);
-    KlUefiConn *c = conn_of(fd);
-    if (c) g_last_ctx_status = c->last_status;
+    w_publish(fd, r);
     return r;
 }
 static kl_ssize_t w_recv_peek(void *cx, KlSocketHandle fd, void *b, size_t n) {

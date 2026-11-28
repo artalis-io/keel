@@ -61,6 +61,14 @@ int kl_comp_post_sendfile(KlHttpConn *c, const KlIoVec *head_iov, int head_n,
  * Returns 0 to continue the run loop, -1 to stop. */
 int kl_http_comp_run(struct KlHttpServer *server, int timeout_ms);
 
+/* The one-time part of kl_http_comp_run: install the conn-dispatch hook and set up the accept path
+ * from the backend's window (prime the accepts; on a post-driven backend start the accept
+ * listener), latching accept_setup_done only once that fully succeeded. Idempotent once latched.
+ * kl_http_server_run calls it before publishing the bound port, so a run whose accept setup fails
+ * never publishes one; kl_http_comp_run calls it too (a freestanding server's first tick). Returns
+ * 0, or -1 if the setup failed (not latched). */
+int kl_http_comp_accept_setup(struct KlHttpServer *server);
+
 /* Teardown accept quiescence: force every posted accept to completion, then reap to confirmed
  * KlListener detachment with a teardown-specific dispatcher (no live tick). Returns 0, or -1 if the
  * force could not be guaranteed. Call once, after the listen socket is closed. */

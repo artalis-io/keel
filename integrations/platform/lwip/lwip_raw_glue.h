@@ -242,6 +242,11 @@ int kl_lwr_next_client_ready(void *lwrctx, int *cursor, void **watcher_udata, un
  *     no data yet (caller re-arms READ = EAGAIN). */
 long kl_lwr_client_send(void *lwrctx, void *pcb, const void *buf, size_t len, int *would_block);
 long kl_lwr_client_recv(void *lwrctx, void *pcb, void *dst, size_t cap, int *would_block);
+/* kl_lwr_client_peek: kl_lwr_client_recv without consuming: copies up to `cap` bytes from the front of
+ * the retained rx queue and leaves them queued (no tcp_recved). Same returns: bytes (> 0), 0 on peer
+ * close/EOF with nothing queued, -1 with *would_block=1 when connected but nothing has arrived, -1
+ * otherwise (not a client pcb). The pooled client's test-on-borrow is the caller. */
+long kl_lwr_client_peek(void *lwrctx, void *pcb, void *dst, size_t cap, int *would_block);
 /* Synchronous send on a SERVER-accepted live connection (`conn` is its handle): a socket send op on
  * an accepted connection. The raw backend has no blocking send, so this mirrors kl_lwr_client_send:
  * tcp_write(COPY) bounded by tcp_sndbuf + tcp_output. Returns bytes queued (> 0), 0 with

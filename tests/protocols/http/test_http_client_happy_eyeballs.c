@@ -99,9 +99,9 @@ static int start_server(KlHttpServer *srv, KlPlatThread *tid) {
     kl_http_server_route(srv, "GET", "/ok", handle_ok, NULL, NULL);
     if (kl_plat_thread_create(tid, server_thread_fn, srv) != 0)
         return -1;
-    for (int i = 0; i < 200 && srv->bound_port == 0; i++)
+    for (int i = 0; i < 200 && kl_http_server_bound_port(srv) == 0; i++)
         kl_test_sleep_ms(10);
-    return srv->bound_port > 0 ? 0 : -1;
+    return kl_http_server_bound_port(srv) > 0 ? 0 : -1;
 }
 
 static void stop_server(KlHttpServer *srv, KlPlatThread tid) {
@@ -195,8 +195,8 @@ UTEST(he, first_wins) {
 
     memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
-    g_res_ports[0] = srv.bound_port;     /* both live → first wins the race */
-    g_res_ports[1] = srv.bound_port;
+    g_res_ports[0] = kl_http_server_bound_port(&srv);     /* both live → first wins the race */
+    g_res_ports[1] = kl_http_server_bound_port(&srv);
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
@@ -226,7 +226,7 @@ UTEST(he, fallback_on_refused) {
     memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
     g_res_ports[0] = reserve_closed_port();  /* ECONNREFUSED → fast failover */
-    g_res_ports[1] = srv.bound_port;         /* live: wins */
+    g_res_ports[1] = kl_http_server_bound_port(&srv);         /* live: wins */
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
@@ -281,7 +281,7 @@ UTEST(he, single_address) {
 
     memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 1;
-    g_res_ports[0] = srv.bound_port;
+    g_res_ports[0] = kl_http_server_bound_port(&srv);
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
@@ -311,7 +311,7 @@ UTEST(he, second_wins_on_slow_first) {
     memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
     g_res_ip[0] = BLACKHOLE_IP; g_res_ports[0] = 80;   /* stalls */
-    g_res_ports[1] = srv.bound_port;                   /* live: wins after delay */
+    g_res_ports[1] = kl_http_server_bound_port(&srv);                   /* live: wins after delay */
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));
@@ -368,8 +368,8 @@ UTEST(he_detach, winner_and_loser) {
     ASSERT_EQ(0, start_server(&srv, &tid));
     memset((void *)g_res_ip, 0, sizeof(g_res_ip));
     g_res_n = 2;
-    g_res_ports[0] = srv.bound_port;
-    g_res_ports[1] = srv.bound_port;
+    g_res_ports[0] = kl_http_server_bound_port(&srv);
+    g_res_ports[1] = kl_http_server_bound_port(&srv);
 
     KlAllocator a = kl_allocator_default();
     KlEventCtx ev; ASSERT_EQ(0, kl_event_ctx_init(&ev, &a));

@@ -13,7 +13,7 @@
 
 /* Wait for server to bind (max 2s) */
 static void wait_for_bind(KlHttpServer *s) {
-    for (int i = 0; i < 200 && s->bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(s) == 0; i++) kl_test_sleep_ms(10);
 }
 
 /* Shared state between handler and test */
@@ -162,7 +162,7 @@ UTEST(request, header_case_insensitive) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /hdr HTTP/1.1\r\n"
@@ -187,7 +187,7 @@ UTEST(request, header_missing_returns_null) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /hdr HTTP/1.1\r\n"
@@ -210,7 +210,7 @@ UTEST(request, header_with_len) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /hdr HTTP/1.1\r\n"
@@ -234,7 +234,7 @@ UTEST(request, header_empty_value) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /hdr HTTP/1.1\r\n"
@@ -264,7 +264,7 @@ UTEST(request, param_basic) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /items/42 HTTP/1.1\r\n"
@@ -290,7 +290,7 @@ UTEST(request, param_multi) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /users/7/posts/99 HTTP/1.1\r\n"
@@ -320,7 +320,7 @@ UTEST(request, param_missing) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /users/7/posts/99 HTTP/1.1\r\n"
@@ -348,7 +348,7 @@ UTEST(request, query_basic) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /q?foo=bar HTTP/1.1\r\n"
@@ -373,7 +373,7 @@ UTEST(request, query_empty) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /q? HTTP/1.1\r\n"
@@ -397,7 +397,7 @@ UTEST(request, query_absent) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /q HTTP/1.1\r\n"
@@ -425,7 +425,7 @@ UTEST(request, header_null_terminated) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /nultest?a=1 HTTP/1.1\r\n"
@@ -449,7 +449,7 @@ UTEST(request, method_null_terminated) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /nultest?a=1 HTTP/1.1\r\n"
@@ -473,7 +473,7 @@ UTEST(request, path_null_terminated) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /nultest?a=1 HTTP/1.1\r\n"
@@ -497,7 +497,7 @@ UTEST(request, query_null_terminated) {
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread, NULL);
     wait_for_bind(&req_server);
-    int port = req_server.bound_port;
+    int port = kl_http_server_bound_port(&req_server);
 
     send_and_wait(port,
         "GET /nultest?a=1 HTTP/1.1\r\n"

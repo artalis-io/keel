@@ -20,6 +20,7 @@
 #include <keel/tls.h>
 #include <keel/http_compress.h>
 #include "net_compat.h"
+#include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
 #include "mock_tls.h"
 #include "http_conn_internal.h"   /* white-box: the server-side socket, to shrink its send buffer */
 #include "platform_thread.h"
@@ -608,6 +609,16 @@ static int      g_cfg_max_conns;
 static const KlEventProvider *g_cfg_provider;
 static void handle_where(KlHttpRequest *req, KlHttpResponse *res, void *ctx);
 
+/* The pool is loop-owned: the probe reads it on the loop thread with each stats snapshot. */
+static KlTestStatsProbe g_probe;
+static int g_pool_active, g_pool_fl_sound;
+static void pool_on_loop(KlHttpServer *srv, void *ud) {
+    (void)ud;
+    KlHttpConn *fl = srv->pool.free_list;
+    kl_atomic_store_int(&g_pool_active, srv->pool.active_count);
+    kl_atomic_store_int(&g_pool_fl_sound, fl != NULL && fl->next_free != fl);
+}
+
 static int server_start(size_t capacity, int tls) {
     static KlTlsConfig tls_cfg = { .ctx = NULL, .factory = mock_tls_create };
     KlHttpServerConfig cfg = { .port = 0, .max_connections = g_cfg_max_conns ? g_cfg_max_conns : 4,
@@ -642,9 +653,11 @@ static int server_start(size_t capacity, int tls) {
     kl_http_server_route_streaming_async(&g_srv, "POST", "/await_file", handle_file_then_await,
                                          (void *)(size_t)8, kl_http_body_reader_buffer);
 #endif
+    if (kl_test_stats_probe_init(&g_probe, &g_srv) != 0) return -1;
+    g_probe.on_loop = pool_on_loop;
     kl_plat_thread_create(&g_tid, server_thread_fn, &g_srv);
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
-    return g_srv.bound_port;
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_srv) == 0; i++) kl_test_sleep_ms(10);
+    return kl_http_server_bound_port(&g_srv);
 }
 
 static void server_stop_join(void) {
@@ -653,6 +666,7 @@ static void server_stop_join(void) {
 }
 static void server_stop(void) {
     server_stop_join();
+    kl_test_stats_probe_free(&g_probe);
     kl_http_server_free(&g_srv);
 }
 
@@ -848,8 +862,8 @@ UTEST(stream_termination, a_stale_begin_between_requests_writes_nothing) {
  * gets both in one buffer: it answers the first and closes (pipelining is not supported). */
 UTEST(stream_termination, a_tls_request_already_in_the_engine_is_not_left_waiting) {
     static const char reqs[] = GET_HELLO GET_HELLO;
-    mock_tls_split_after = 0;
-    mock_tls_split_record = sizeof reqs - 1;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(sizeof reqs - 1));
     mock_tls_sock_serve_max = sizeof GET_HELLO - 1;   /* one request per read, the rest pending */
     int port = server_start(0, 1);
     ASSERT_GT(port, 0);
@@ -869,7 +883,7 @@ UTEST(stream_termination, a_tls_request_already_in_the_engine_is_not_left_waitin
         kl_test_closesock(fd);
     }
     server_stop();
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
     mock_tls_sock_serve_max = 0;
     printf("  %s: first %ld, second %ld, closed %d, reset %d\n", completion ? "completion" : "readiness",
            p.first_len, p.second_len, p.closed, p.reset);
@@ -1042,11 +1056,11 @@ UTEST(stream_termination, a_non_reading_client_of_a_committed_answer_ends_by_the
     uint64_t t0 = kl_monotonic_ms();
     kl_test_sleep_ms(400);
     KlHttpServerStats st;
-    kl_http_server_stats(&g_srv, &st);
+    int probe_failed = kl_test_stats_probe_get(&g_probe, &st) != 0;
     int held = st.active_connections;
     uint64_t t1 = t0;
     for (;;) {
-        kl_http_server_stats(&g_srv, &st);
+        if (kl_test_stats_probe_get(&g_probe, &st) != 0) { probe_failed = 1; break; }
         t1 = kl_monotonic_ms();
         if (st.active_connections == 0 || t1 - t0 > 10000) break;
         kl_test_sleep_ms(20);
@@ -1058,6 +1072,7 @@ UTEST(stream_termination, a_non_reading_client_of_a_committed_answer_ends_by_the
     printf("  %s: send rc %d; held at 400 ms %d, released after %llu ms; first bytes %.12s\n",
            completion ? "completion" : "readiness", g_committed_rc, held,
            (unsigned long long)(t1 - t0), n > 0 ? head : "");
+    EXPECT_EQ(probe_failed, 0);                  /* the loop answered every probe */
     EXPECT_EQ(st.active_connections, 0);
     EXPECT_LT(t1 - t0, (uint64_t)4000);              /* the idle timeout, plus the sweep's tick */
     if (completion) {
@@ -1497,6 +1512,7 @@ static void fast_upload_slow_read_case(int *utest_result, int flood_ms, size_t b
     uint64_t discarded = g_answer_conn ? g_answer_conn->drain_discarded : 0;
     int released = g_answer_conn && g_answer_conn->state == KL_HTTP_CONN_CLOSED;
     size_t window = g_answer_conn ? g_answer_conn->stream.read_cap : 0;
+    kl_test_stats_probe_free(&g_probe);
     kl_http_server_free(&g_srv);
     if (flood_ms && fd >= 0) kl_test_closesock(fd);
     printf("  sent %zu; wire %zu, first %ld, body %zu, closed %d, reset %d; server discarded %llu\n",
@@ -1710,23 +1726,24 @@ static int built_in_is_completion(void) {
 static int wait_active(int want, int ms) {
     KlHttpServerStats st;
     for (int i = 0; i * 10 < ms; i++) {
-        kl_http_server_stats(&g_srv, &st);
+        if (kl_test_stats_probe_get(&g_probe, &st) != 0) return -1;   /* the loop did not answer */
         if (st.active_connections == want) return want;
         kl_test_sleep_ms(10);
     }
-    kl_http_server_stats(&g_srv, &st);
+    if (kl_test_stats_probe_get(&g_probe, &st) != 0) return -1;
     return st.active_connections;
 }
 
 /* The pool after the connections above it are gone: none active, and a free list that does not
  * loop on its head. */
 static void expect_pool_sound(int *utest_result) {
-    int active = wait_active(0, 2000);
-    KlHttpConn *fl = g_srv.pool.free_list;
-    printf("  active %d, free list %p -> %p\n", active, (void *)fl, fl ? (void *)fl->next_free : NULL);
+    int active = wait_active(0, 2000);   /* its last snapshot also took the pool state below */
+    int pool_active = kl_atomic_load_int(&g_pool_active);
+    int fl_sound = kl_atomic_load_int(&g_pool_fl_sound);
+    printf("  active %d, pool active %d, free list sound %d\n", active, pool_active, fl_sound);
     EXPECT_EQ(active, 0);
-    EXPECT_EQ(g_srv.pool.active_count, 0);
-    EXPECT_TRUE(fl != NULL && fl->next_free != fl);
+    EXPECT_EQ(pool_active, 0);
+    EXPECT_TRUE(fl_sound);
 }
 
 /* Read one response and check it is the 200 for `id`. */

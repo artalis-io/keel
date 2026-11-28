@@ -14,6 +14,7 @@
 #include "socket.h"       /* seam: kl_sock_* + KlSockAddr (no direct sockaddr) */
 #include "event_caps.h"   /* event↔socket capability negotiation */
 #include "completion_io.h"    /* completion-loop tick dispatch (IOCP) */
+#include "completion_http.h"  /* kl_http_comp_accept_setup: a completion loop's accept path */
 #include "http_server_plat.h"  /* AF_UNIX bind, peer creds, signals: per-platform, no #ifdef here */
 #include "platform.h"     /* KlPlatWakeup: self-pipe so kl_http_server_stop wakes the run loop */
 /* No websocket_server.h / http2_server.h / http2_internal.h: the readiness data plane now
@@ -43,7 +44,7 @@ void kl_http_server_log_errno(KlHttpServer *s, int level, const char *msg) {
     kl_http_server_log(s, level, "%s: %s", msg, strerror(errno));
 }
 
-static int kl_http_server_bind_tcp(KlHttpServer *s) {
+static int kl_http_server_bind_tcp(KlHttpServer *s, int *port) {
     /* Parse the numeric bind address (IPv4/IPv6 literal); no DNS. */
     KlSockAddr bind_sa;
     if (kl_sockaddr_parse(&bind_sa, s->config.bind_addr, (uint16_t)s->config.port) != 0) {
@@ -80,7 +81,7 @@ static int kl_http_server_bind_tcp(KlHttpServer *s) {
     {
         KlSockAddr la;
         if (kl_sock_get_local_addr(s->ev.sockets, s->listen_fd, &la) == 0)
-            s->bound_port = kl_sockaddr_port(&la);
+            *port = kl_sockaddr_port(&la);
     }
 
     return 0;
@@ -91,7 +92,7 @@ static int kl_http_server_bind_tcp(KlHttpServer *s) {
  * family determines the transport, so TCP_NODELAY and unlink policy stay
  * correct. KEEL never owns (never unlinks) an adopted UNIX socket.
  */
-static int kl_http_server_adopt_fd(KlHttpServer *s) {
+static int kl_http_server_adopt_fd(KlHttpServer *s, int *port) {
     s->listen_fd = s->config.listen_fd;
 
     KlSockAddr la;
@@ -104,10 +105,10 @@ static int kl_http_server_adopt_fd(KlHttpServer *s) {
 
     if (kl_sockaddr_family(&la) == KL_AF_UNIX) {
         s->config.transport = KL_HTTP_SERVER_TRANSPORT_UNIX;
-        s->bound_port = 0;
+        *port = 0;
     } else {
         s->config.transport = KL_HTTP_SERVER_TRANSPORT_TCP;
-        s->bound_port = kl_sockaddr_port(&la);
+        *port = kl_sockaddr_port(&la);
     }
     /* Adopted fd is never unlinked; the supervisor owns the socket path. */
     s->unix_socket_owned = 0;
@@ -116,12 +117,15 @@ static int kl_http_server_adopt_fd(KlHttpServer *s) {
     return 0;
 }
 
-static int kl_http_server_bind_listener(KlHttpServer *s) {
+/* Binds (or adopts) the listener and reports its port in *port (0 for a UNIX socket). The port is
+ * not stored on the server here: kl_http_server_run publishes it once the socket is listening. */
+static int kl_http_server_bind_listener(KlHttpServer *s, int *port) {
+    *port = 0;
     if (s->config.listen_fd > 0)
-        return kl_http_server_adopt_fd(s);
+        return kl_http_server_adopt_fd(s, port);
     if (s->config.transport == KL_HTTP_SERVER_TRANSPORT_UNIX)
         return kl_http_server_plat_bind_unix(s);
-    return kl_http_server_bind_tcp(s);
+    return kl_http_server_bind_tcp(s, port);
 }
 
 /* Fail closed off the built-in provider: the handle of an lwIP, UEFI or injected transport is not a
@@ -347,7 +351,8 @@ int kl_http_server_run(KlHttpServer *s) {
         return 0;
     }
 
-    if (kl_http_server_bind_listener(s) < 0)
+    int port = 0;
+    if (kl_http_server_bind_listener(s, &port) < 0)
         return server_start_failed(s);
 
     /* An adopted fd (socket activation) is already listening; don't re-listen. */
@@ -381,10 +386,10 @@ int kl_http_server_run(KlHttpServer *s) {
                                           : "(inherited fd)");
     } else if (s->config.listen_fd > 0) {
         kl_http_server_log(s, KL_HTTP_SERVER_LOG_INFO, "listening on inherited fd %d (port %d)",
-               (int)s->listen_fd, s->bound_port);
+               (int)s->listen_fd, port);
     } else {
         kl_http_server_log(s, KL_HTTP_SERVER_LOG_INFO, "listening on %s:%d",
-               s->config.bind_addr, s->bound_port);
+               s->config.bind_addr, port);
     }
 
     /* Ignore SIGPIPE + install SIGTERM/SIGINT graceful-stop handlers (POSIX) or
@@ -432,7 +437,21 @@ int kl_http_server_run(KlHttpServer *s) {
     }
 
     int run_failed = 0;                 /* the loop stopped on an error, not on a stop */
-    while (kl_atomic_load_int(&s->running)) {
+
+    /* A completion loop sets up its accept path (prime the accepts, start the accept listener) here,
+     * before the port is published, rather than in its first tick. A failure takes the same exit a
+     * failed first tick did. */
+    if (completion_loop && kl_http_comp_accept_setup(s) < 0)
+        run_failed = 1;
+
+    /* Startup has succeeded: the socket listens and is registered with the loop, its accept path is
+     * set up, and no setup step is left that can fail. Publish the port only now, with an atomic
+     * store, so a nonzero port is never seen for a run that fails to start; another thread may poll
+     * kl_http_server_bound_port (an atomic load) until it is nonzero. */
+    if (!run_failed)
+        kl_atomic_store_int(&s->bound_port, port);
+
+    while (!run_failed && kl_atomic_load_int(&s->running)) {
         if (completion_loop) {
             /* One completion-loop tick: factored into the freestanding-safe server
              * core (http_server_core.c) so a freestanding EFI server shares it verbatim. */

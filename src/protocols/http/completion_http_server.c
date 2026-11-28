@@ -1608,22 +1608,30 @@ void kl_http_comp_post_read(struct KlHttpConn *c) {
  * posted accept and PAUSEs (kernel backlog queues) when the pool is full instead of accept-and-
  * dropping. window==0 is an AUTONOMOUS backend (EFI/lwip) that gates capacity in its own drain; it
  * gets no listener and is re-primed each tick so a freed slot re-opens its gate (EFI top-up). */
-int kl_http_comp_run(struct KlHttpServer *s, int timeout_ms) {
+int kl_http_comp_accept_setup(struct KlHttpServer *s) {
     s->ev.comp_conn_dispatch = comp_server_conn_dispatch;
+    if (s->accept_setup_done) return 0;
+    int window = kl_comp_prime_accepts(s);       /* one-time setup; returns the accept window */
+    if (window < 0) return -1;                   /* setup NOT latched; a retry re-attempts */
+    if (window >= 1) {
+        /* Post-driven: start the listener BEFORE latching setup_done, so a start failure
+         * leaves setup unlatched (honest retry / error cleanup). prime_accepts is idempotent
+         * (returns the same window), so the retry re-primes cheaply then re-starts. */
+        if (comp_accept_listener_start(s, window) < 0) return -1;
+        s->accept_via_listener = 1;
+    }
+    /* window == 0: autonomous backend; prime already armed its own gate. */
+    s->accept_setup_done = 1;                    /* latch only after setup fully succeeded */
+    return 0;
+}
+
+int kl_http_comp_run(struct KlHttpServer *s, int timeout_ms) {
     if (!s->accept_setup_done) {
-        int window = kl_comp_prime_accepts(s);   /* one-time setup; returns the accept window */
-        if (window < 0) return -1;               /* setup NOT latched; a retry re-attempts */
-        if (window >= 1) {
-            /* Post-driven: start the listener BEFORE latching setup_done, so a start failure
-             * leaves setup unlatched (honest retry / error cleanup). prime_accepts is idempotent
-             * (returns the same window), so the retry re-primes cheaply then re-starts. */
-            if (comp_accept_listener_start(s, window) < 0) return -1;
-            s->accept_via_listener = 1;
-        }
-        /* window == 0: autonomous backend; prime already armed its own gate. */
-        s->accept_setup_done = 1;                /* latch only after setup fully succeeded */
-    } else if (!s->accept_via_listener) {
-        if (kl_comp_prime_accepts(s) < 0) return -1;   /* autonomous: re-arm the gate each tick */
+        if (kl_http_comp_accept_setup(s) < 0) return -1;
+    } else {
+        s->ev.comp_conn_dispatch = comp_server_conn_dispatch;
+        if (!s->accept_via_listener && kl_comp_prime_accepts(s) < 0)
+            return -1;                           /* autonomous: re-arm the gate each tick */
     }
     return kl_comp_run(&s->ev, KL_COMP_MAX_EVENTS, timeout_ms) < 0 ? -1 : 0;
 }

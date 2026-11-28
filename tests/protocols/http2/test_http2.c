@@ -7,9 +7,12 @@
 #include <keel/http_connection.h>
 #include <keel/http_router.h>
 #include <keel/http_body_reader.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "net_compat.h"
+#include "atomic_flags.h"    /* the mock's recv_count, polled across threads by one test */
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "http_internal.h"     /* kl_http_server_sweep_conn_timeouts, kl_http_server_settle_h2 */
 #include "event_caps.h"        /* kl_event_caps: is the server's loop a completion loop? */
@@ -100,7 +103,7 @@ static kl_ssize_t mock_recv(KlHttp2ServerSession *self, const void *data, size_t
         m->first_recv_len = len < sizeof(m->first_recv) ? len : sizeof(m->first_recv);
         memcpy(m->first_recv, data, m->first_recv_len);
     }
-    m->recv_count++;
+    T_INC(m->recv_count);
     if (m->recv_return >= 0)
         return (kl_ssize_t)len;
     return m->recv_return;
@@ -854,6 +857,50 @@ UTEST(h2, data_for_a_finished_stream_is_ignored) {
     test_teardown();
     ASSERT_EQ(rd, 0);
     ASSERT_EQ(re, 0);
+}
+
+/* content-length is accumulated in a size_t: SIZE_MAX itself is a valid value, one more is not. The
+ * last digit of SIZE_MAX is 5 (4294967295, 18446744073709551615), so SIZE_MAX + 1 is the same
+ * digits ending in 6: a guard that only checks the running value against SIZE_MAX / 10 lets that
+ * final `* 10 + 6` wrap to 0 and the stream would be accepted as having no body. */
+UTEST(h2, content_length_one_past_size_max_is_rejected) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL, test_br_factory);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    char max_s[32], over_s[32];
+    int n = snprintf(max_s, sizeof max_s, "%zu", (size_t)SIZE_MAX);
+    ASSERT_TRUE(n > 1 && max_s[n - 1] == '5');
+    memcpy(over_s, max_s, (size_t)n + 1);
+    over_s[n - 1] = '6';                          /* SIZE_MAX + 1 */
+
+    const char *hn[] = {"content-length"};
+    size_t hnl[] = {14};
+    const char *hv_max[] = {max_s};
+    size_t hvl[] = {(size_t)n};
+    int rc_max = mock.callbacks.on_request(mock.cb_user_data, 1, "POST", 4, "/data", 5,
+                                           NULL, 0, hn, hv_max, hnl, hvl, 1);
+    int streams_after_max = conn.h2->num_streams;
+    size_t cl_max = streams_after_max == 1 ? conn.h2->streams[0].req.content_length : 0;
+
+    const char *hv_over[] = {over_s};
+    int rc_over = mock.callbacks.on_request(mock.cb_user_data, 3, "POST", 4, "/data", 5,
+                                            NULL, 0, hn, hv_over, hnl, hvl, 1);
+    int streams_after_over = conn.h2->num_streams;
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(rc_max, 0);
+    ASSERT_EQ(streams_after_max, 1);
+    ASSERT_TRUE(cl_max == (size_t)SIZE_MAX);
+    ASSERT_EQ(rc_over, -1);
+    ASSERT_EQ(streams_after_over, 1);
 }
 
 /* A stream whose body passes max_body_size is answered 413 on that stream, and the call succeeds:
@@ -2339,13 +2386,13 @@ UTEST(h2, prior_knowledge_preface_reaches_the_session_whole) {
     ASSERT_EQ(kl_http_server_init(&g_pk_srv, &cfg), 0);
     KlPlatThread t;
     kl_plat_thread_create(&t, pk_server_thread, NULL);
-    for (int i = 0; i < 200 && g_pk_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_pk_srv) == 0; i++) kl_test_sleep_ms(10);
 
     int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)g_pk_srv.bound_port);
+    addr.sin_port = htons((uint16_t)kl_http_server_bound_port(&g_pk_srv));
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
     int ok = fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0;
     static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
@@ -2354,12 +2401,12 @@ UTEST(h2, prior_knowledge_preface_reaches_the_session_whole) {
         (void)kl_test_sockwrite(fd, preface, 24);
         (void)kl_test_sockwrite(fd, settings, sizeof settings);
     }
-    for (int i = 0; ok && i < 200 && g_pk_mock.recv_count == 0; i++) kl_test_sleep_ms(10);
-    size_t got = g_pk_mock.first_recv_len;
-    int whole = got >= 24 && memcmp(g_pk_mock.first_recv, preface, 24) == 0;
+    for (int i = 0; ok && i < 200 && T_LOAD(g_pk_mock.recv_count) == 0; i++) kl_test_sleep_ms(10);
     if (fd >= 0) kl_test_closesock(fd);
     kl_http_server_stop(&g_pk_srv);
     kl_plat_thread_join(&t);
+    size_t got = g_pk_mock.first_recv_len;         /* the session's state, read after the join */
+    int whole = got >= 24 && memcmp(g_pk_mock.first_recv, preface, 24) == 0;
     kl_http_server_free(&g_pk_srv);
     test_teardown();
     ASSERT_TRUE(ok);

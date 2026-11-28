@@ -656,12 +656,12 @@ UTEST(h2c_live, tls_record_split_across_reads_is_not_closed) {
     for (int i = 0; c && i < 200 && !g_live_session && !g_split_errors; i++) (void)kl_event_ctx_run(&ev, 16, 10);
     KlSocketHandle peer = (KlSocketHandle)accept((int)l.fd, NULL, NULL);
 
-    mock_tls_split_record = 10;                /* a 10-byte record, sent in two parts */
+    kl_atomic_store_int(&mock_tls_split_record, (int)(10));                /* a 10-byte record, sent in two parts */
     (void)send((int)peer, "0123", 4, 0);
     for (int i = 0; i < 15; i++) (void)kl_event_ctx_run(&ev, 16, 10);
     (void)send((int)peer, "456789", 6, 0);
     for (int i = 0; i < 50 && g_split_bytes < 10 && !g_split_errors; i++) (void)kl_event_ctx_run(&ev, 16, 10);
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
     mock_tls_alpn = NULL;
 
     size_t got = g_split_bytes;

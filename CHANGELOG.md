@@ -41,6 +41,18 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `kl_http_response_json`, `kl_http_response_error`) refuse a response whose stream has begun: they
   change nothing, and those that return a value return -1. They used to replace the begun stream's
   body, which on HTTP/2 left a stream that could never end.
+- Documented which thread may call `kl_http_server_stats`: the stats snapshot is a loop-thread read
+  (it walks the suspended-operation list), safe elsewhere only when no run is in progress.
+- **`kl_http_server_bound_port` is safe from any thread, and nonzero means startup succeeded.** The
+  run now publishes the port with an atomic store once startup has succeeded (the socket listens and
+  is registered with the loop, a completion loop's accept path is set up, and no startup step is
+  left that can fail), and the function reads it
+  with an atomic load. It used to be a plain write made right after the bind, before `listen()`, and
+  stayed set when the start then failed. Polling it from another thread until it is nonzero, as a test
+  or a supervisor starting a server on its own thread does, is now well defined; a run that fails to
+  start never publishes a port (so a poller also watches the run's result). A nonzero value says only that startup got that far, not that the
+  server still accepts after a stop. Reading the `bound_port` field directly from another thread is
+  still a data race.
 
 ### Fixed
 
@@ -87,6 +99,41 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   any handle a caller still holds becomes invalid at destroy. `resolver.h` now states what every
   `KlResolver` implementation's `cancel()` must guarantee (no later `done_fn`) and the destroy
   behaviour of the in-tree resolvers.
+- **miniz codec: no pointer arithmetic on NULL when draining.** The streaming gzip decoder is called
+  with no input (`data == NULL`, length 0) to drain output a stopped feed left behind and for the
+  final flush. It advanced that NULL pointer by zero and handed it to `tinfl_decompress`, which C
+  leaves undefined (clang's UBSan aborts on it). It now starts from an empty buffer instead. The
+  miniz regression tests in CI are built with clang so its sanitizer checks this.
+- **HTTP/2: a `content-length` one past `SIZE_MAX` no longer reads as a small number.** The overflow
+  guard checked the running value against `SIZE_MAX / 10`, which still let the last `* 10 + digit`
+  wrap: `18446744073709551616` (on 64-bit; `4294967296` on 32-bit) was taken as 0 and the stream as
+  having no body. Such a value is now rejected like any other malformed `content-length`. nghttp2
+  still checks the DATA received against the header, so framing was not affected; the request's
+  `content_length` and the body reader chosen for it were.
+- **OpenSSL / BoringSSL / LibreSSL and mbedTLS adapters: a socket provider's `io_status` decides
+  would-block.** On a readiness loop the adapters' socket BIOs judged a failed send or receive by
+  `errno`, which a provider without a hosted errno (the socket provider contract lets it report
+  through `KlSocketOps.io_status` alone) does not set: a transient would-block failed the TLS session.
+  They now classify the failure with the provider, as the rest of Keel does: would-block waits for
+  readiness, an interrupted call is retried at once (up to 16 times; a provider still interrupted
+  after that fails the call rather than waiting for a readiness edge that need not come), anything
+  else fails. An interrupted call was fatal at once before, though the built-in providers retry EINTR
+  themselves. Unchanged for the built-in POSIX
+  and Winsock providers and for lwIP.
+- **UEFI EFI_TCP4 provider: a failure on a dead connection is reported as a failure.** The
+  provider's `io_status` reports the status its last call published, and a send or receive on a
+  connection that was gone (closed, marked dead, quarantined by a pump timeout) or made after
+  ExitBootServices published nothing: it read as whatever the previous call left, often a
+  would-block, so a caller classifying by `io_status` (the TLS adapters now do) re-armed a dead
+  connection until a deadline. Every failure now publishes a fatal status, and a latched receive
+  error is never published as retryable.
+- **lwIP raw provider:** every failing socket op now sets `errno` (send, receive, local address and
+  bind: EIO or EINVAL; shutdown: ENOTSUP); they left `errno` as the previous call set it, which could
+  read as a would-block. `recv_peek` is now a real non-consuming peek on a client connection
+  (queued bytes, 0 once the peer closed, would-block while it is open and idle), so the pooled
+  client's test-on-borrow reuses an idle connection and drops one the server closed; it was a stub
+  whose answer depended on a stale `errno`. On a server-accepted connection it fails (EIO). The EFI_TCP4 provider's local-address call likewise
+  publishes its own failure for a bad argument.
 
 ## [3.6.0]
 

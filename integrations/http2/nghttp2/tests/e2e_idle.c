@@ -65,11 +65,11 @@ static int case_idle_timeout(void) {
     kl_http_server_route(&g_srv, "GET", "/hello", handle_hello, NULL, NULL);
     pthread_t tid;
     if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) return fail("server thread");
-    for (int i = 0; i < 200 && g_srv.bound_port == 0; i++) nap(5);
-    if (g_srv.bound_port <= 0) return fail("server never bound");
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_srv) == 0; i++) nap(5);
+    if (kl_http_server_bound_port(&g_srv) <= 0) return fail("server never bound");
 
     char url[64];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d", g_srv.bound_port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d", kl_http_server_bound_port(&g_srv));
     KlEventCtx ev;
     if (kl_event_ctx_init(&ev, &alloc) < 0) return fail("event ctx");
     KlHttp2ClientConfig ccfg;
@@ -203,10 +203,10 @@ static int case_idle_goaway(void) {
     kl_http_server_route(&g_gsrv, "GET", "/hello", handle_hello, NULL, NULL);
     pthread_t tid;
     if (pthread_create(&tid, NULL, gsrv_thread, NULL) != 0) return fail("server thread");
-    for (int i = 0; i < 200 && g_gsrv.bound_port == 0; i++) nap(5);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_gsrv) == 0; i++) nap(5);
 
     RawClient c;
-    int ok = raw_connect(&c, g_gsrv.bound_port) == 0 && raw_get(&c, "/hello") == 0;
+    int ok = raw_connect(&c, kl_http_server_bound_port(&g_gsrv)) == 0 && raw_get(&c, "/hello") == 0;
     for (int i = 0; ok && i < 400 && !c.eof; i++) raw_pump(&c, 10);   /* idle: up to ~4 s */
     int eof = c.eof, goaway = c.goaway;
     if (ok || c.ng) raw_free(&c);
@@ -235,10 +235,10 @@ static int case_drain_closes_a_done_session(void) {
     kl_http_server_route(&g_dsrv, "GET", "/hello", handle_hello, NULL, NULL);
     pthread_t tid;
     if (pthread_create(&tid, NULL, dsrv_thread, NULL) != 0) return fail("server thread");
-    for (int i = 0; i < 200 && g_dsrv.bound_port == 0; i++) nap(5);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&g_dsrv) == 0; i++) nap(5);
 
     RawClient c;
-    int ok = raw_connect(&c, g_dsrv.bound_port) == 0 && raw_get(&c, "/hello") == 0;
+    int ok = raw_connect(&c, kl_http_server_bound_port(&g_dsrv)) == 0 && raw_get(&c, "/hello") == 0;
     uint64_t t0 = kl_monotonic_ms();
     kl_http_server_stop(&g_dsrv);                          /* drain: GOAWAY, then wait for streams */
     for (int i = 0; ok && i < 700 && !c.eof; i++) raw_pump(&c, 10);   /* up to ~7 s */

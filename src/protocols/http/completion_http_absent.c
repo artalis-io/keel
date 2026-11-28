@@ -43,6 +43,8 @@ int kl_http_comp_run(struct KlHttpServer *server, int timeout_ms) {
     (void)server; (void)timeout_ms; abort();
 }
 
+int kl_http_comp_accept_setup(struct KlHttpServer *server) { (void)server; abort(); }
+
 int kl_http_comp_quiesce_accepts(struct KlHttpServer *server) { (void)server; abort(); }
 
 void kl_http_comp_resume(struct KlHttpServer *server, KlHttpConn *conn) {

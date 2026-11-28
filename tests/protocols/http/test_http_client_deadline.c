@@ -17,6 +17,7 @@
 #include <keel/resolver.h>
 #include <keel/clock.h>
 #include "net_compat.h"
+#include "atomic_flags.h"    /* the peer's release and the run's done flag cross threads */
 #include "platform_thread.h"
 #include "platform_socket.h"
 #include "resolve_sync.h"
@@ -39,7 +40,7 @@ typedef struct {
     KlSocketHandle lfd;
     int port;
     int mode;
-    volatile int release;   /* set by the test: close the connection and leave */
+    int release;            /* set by the test: close the connection and leave (atomic) */
     KlPlatThread t;
 } Peer;
 
@@ -93,14 +94,14 @@ static void peer_thread(void *arg) {
     size_t sent = 0;
     int head_ok = 1;
     if (p->mode != PEER_HOLD) {
-        for (int i = 0; i < 50 && !p->release; i++)   /* the head may take a moment to arrive */
+        for (int i = 0; i < 50 && !T_LOAD(p->release); i++)   /* the head may take a moment to arrive */
             if ((head_ok = peer_read_head(fd) == 0) != 0) break;
     }
     if (head_ok && p->mode == PEER_PARTIAL) (void)kl_test_sockwrite(fd, "abc", 3);
     if (head_ok && p->mode == PEER_SLOW_REPLY) kl_test_sleep_ms(300);
     if (head_ok && (p->mode == PEER_REPLY || p->mode == PEER_SLOW_REPLY))
         (void)kl_test_sockwrite(fd, reply, sizeof reply - 1);
-    for (int i = 0; i < 1000 && !p->release; i++) {   /* at most 10 s, then let go regardless */
+    for (int i = 0; i < 1000 && !T_LOAD(p->release); i++) {   /* at most 10 s, then let go regardless */
         if (head_ok && p->mode == PEER_TRICKLE && sent < sizeof trickle - 1 && i % 5 == 0)
             sent += kl_test_sockwrite(fd, trickle + sent, 1) == 1 ? 1 : 0;
         kl_test_sleep_ms(10);
@@ -110,7 +111,7 @@ static void peer_thread(void *arg) {
 
 static void peer_start(Peer *p) { (void)kl_plat_thread_create(&p->t, peer_thread, p); }
 static void peer_join(Peer *p) {
-    p->release = 1;
+    T_STORE(p->release, 1);
     kl_plat_thread_join(&p->t);
     kl_test_closesock((int)p->lfd);
 }
@@ -125,7 +126,7 @@ typedef struct {
     KlHttpClientConfig cfg;
     int pooled;
     int take_alarm;          /* POSIX: this thread alone takes SIGALRM */
-    volatile int done;
+    int done;                /* set by the request thread, polled by the test (atomic) */
     int rc;
     KlError err;
     int status;
@@ -168,7 +169,7 @@ static void run_thread(void *arg) {
         r->status = resp.status;
         kl_http_client_response_free(&resp);
     }
-    r->done = 1;
+    T_STORE(r->done, 1);
 }
 
 /* Run r against p; returns the milliseconds the call took, or -1 if it did not return within
@@ -176,13 +177,13 @@ static void run_thread(void *arg) {
 static long run_watched(Run *r, Peer *p, unsigned watchdog_ms) {
     r->rc = 0;
     r->err = KL_ERR_NONE;
-    r->done = 0;
+    T_STORE(r->done, 0);
     uint64_t t0 = kl_monotonic_ms();
     peer_start(p);
     if (kl_plat_thread_create(&r->t, run_thread, r) != 0) { peer_join(p); return -2; }
-    while (!r->done && kl_monotonic_ms() - t0 < watchdog_ms)
+    while (!T_LOAD(r->done) && kl_monotonic_ms() - t0 < watchdog_ms)
         kl_test_sleep_ms(5);
-    long took = r->done ? (long)(kl_monotonic_ms() - t0) : -1;
+    long took = T_LOAD(r->done) ? (long)(kl_monotonic_ms() - t0) : -1;
     peer_join(p);
     kl_plat_thread_join(&r->t);
     return took;
@@ -255,9 +256,9 @@ UTEST(client_deadline, sync_tls_partial_record_times_out) {
     static Run r;
     run_init(&r, "https", p.port, TIMEOUT_MS);
     r.cfg.tls = &g_mock_tls;
-    mock_tls_split_record = 64;      /* the 3 bytes sent are part of a 64-byte record */
+    kl_atomic_store_int(&mock_tls_split_record, (int)(64));      /* the 3 bytes sent are part of a 64-byte record */
     long took = run_watched(&r, &p, WATCHDOG_MS);
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
     ASSERT_GE(took, 0);
     ASSERT_LT(took, (long)BOUND_MS);
     ASSERT_EQ(r.rc, -1);

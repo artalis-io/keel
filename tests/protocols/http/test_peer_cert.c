@@ -101,11 +101,11 @@ static int run_once(KlHttpServerConfig *cfg) {
         kl_http_server_free(&srv);
         return -1;
     }
-    for (int i = 0; i < 200 && srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
 
     int rc = -1;
-    if (srv.bound_port > 0) {
-        int fd = connect_local(srv.bound_port);
+    if (kl_http_server_bound_port(&srv) > 0) {
+        int fd = connect_local(kl_http_server_bound_port(&srv));
         if (fd >= 0) {
             const char *req = "GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
             if (kl_test_sockwrite(fd, req, strlen(req)) == (kl_ssize_t)strlen(req)) {
