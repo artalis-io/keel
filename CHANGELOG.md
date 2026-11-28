@@ -134,6 +134,40 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   client's test-on-borrow reuses an idle connection and drops one the server closed; it was a stub
   whose answer depended on a stale `errno`. On a server-accepted connection it fails (EIO). The EFI_TCP4 provider's local-address call likewise
   publishes its own failure for a bad argument.
+- **HTTP/2: a graceful drain no longer resets away the end of responses it reports as complete.**
+  Once a session was done (the drain's GOAWAY out and no stream left, or a client's GOAWAY, or a
+  protocol-error GOAWAY), the connection was closed at once. HTTP/2 clients send frames while they
+  receive (PING, WINDOW_UPDATE, SETTINGS acknowledgements), so the close was usually over unread
+  input, which makes it a TCP reset: the tail still in the server's send queue was discarded and the
+  client's receive failed, while `kl_http_response_stream_on_close` had reported `completed` 1.
+  Seen on every backend. A done session now ends as an HTTP/1.1 connection does after a rejected
+  request: once its output is out it sends close_notify (TLS) and half-closes, then reads and
+  discards what the client still sends until the client's FIN, past `max(reject_drain_max_bytes,
+  max_body_size)` only the hang-up, or `read_timeout_ms`; `reject_drain_disable` turns this off. A
+  client that never closes holds the slot (and a draining server) for up to `read_timeout_ms`, or
+  the drain deadline, whichever comes first. On a completion loop, a client's close_notify during
+  that linger (or after a rejected request's answer) no longer cancels output still queued for it
+  (the end of the answer, the server's own close_notify): it closes once that output is out, as for
+  the client's FIN.
+- **HTTP/2: the idle timeout's close is graceful too.** An idle connection the sweep timed out got
+  its GOAWAY and was closed at once, so a client frame crossing the GOAWAY reset it away. It now
+  ends through the same linger, with the drain's short bounds (`reject_drain_max_bytes`,
+  `reject_drain_timeout_ms`): it only has to deliver the GOAWAY, so a client that timed out gets no
+  second `read_timeout_ms`.
+- **TLS: a drain's close_notify reaches the client.** After a rejected request (a 413, 431, 408),
+  HTTP/1.1 half-closed the connection before the TLS shutdown, so close_notify was written to a shut
+  socket and the client saw its answer end in a truncation. Every drain, HTTP/1.1 and HTTP/2 alike,
+  now sends close_notify after the last record and only then half-closes; on a readiness loop a
+  full send buffer delays the half-close until close_notify is out (bounded by the drain's
+  deadline). It is not sent a second time at release. An engine that refuses the alert on 8
+  writable events in a row is given up on (the FIN goes without it). On a completion loop, a client
+  that ends its TLS session (close_notify) now gets the server's close_notify after everything
+  already queued for it: an HTTP/1.1 connection was closed without one, and an HTTP/2 connection
+  was closed at once, cancelling output still queued.
+- **HTTP/2 on readiness loops: a session done outside its connection's events closed a second
+  late.** A session that finished in the drain's GOAWAY flush or the settle pass was left until the
+  next wait timed out (about one second), so every drain of a server with an HTTP/2 connection took
+  that much longer. Completion loops already ended it at once; readiness loops now do too.
 
 ## [3.6.0]
 

@@ -174,6 +174,21 @@ static void comp_start_body_read(struct KlHttpServer *s, KlHttpConn *c) {
     if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
 }
 
+/* A connection in the drain (DRAINING), its last output possibly still queued (with TLS, possibly
+ * still in the engine's ring: a 408 the sweep wrote, the linger's close_notify): send it, half-close
+ * once it is out (comp_tlsq_then_shutwr, left to the queue), and keep one receive posted, whose
+ * completion discards one bounded chunk (comp_on_read); the idle sweep enforces the byte and time
+ * bounds. A receive already posted (the one that discarded the body while a streamed answer went
+ * out, an HTTP/2 connection's read alongside its output) is that receive. */
+static void comp_drain_receive(struct KlHttpServer *s, KlHttpConn *c) {
+    if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+    if (comp_tlsq_settle(s, c)) return;
+    c->comp_tlsq_then_recv = 0;
+    if (c->comp_recv_posted) return;
+    c->stream.read_len = 0;
+    if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+}
+
 /* Act on what kl_http_conn_send_complete() decided once a response is fully out. Shared by the
  * buffered/file path (comp_on_write) and the streaming path (comp_tls_on_write) so the two cannot
  * drift: both previously treated anything that was not READING as "close now", which silently
@@ -192,14 +207,9 @@ static void comp_after_send_complete(struct KlHttpServer *s, KlHttpConn *c, KlHt
         if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
         break;
     case KL_HTTP_CONN_DRAINING:
-        /* Final response physically retired and SEND half-closed: post a recv so each completion
-         * discards one bounded chunk. The idle sweep enforces the byte and time bounds. The
-         * half-close was left to the output queue (empty by now): do it here. A receive may already
-         * be posted: the one that discarded the body while a streamed answer went out. */
-        if (comp_tlsq_settle(s, c)) break;
-        if (c->comp_recv_posted) break;
-        c->stream.read_len = 0;
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+        /* Final response physically retired: the half-close left to the output queue (empty by
+         * now) happens here, then the discarding receive. */
+        comp_drain_receive(s, c);
         break;
     case KL_HTTP_CONN_CLOSED:             /* response was final and nothing is outstanding */
         kl_comp_close(s, c);
@@ -544,6 +554,22 @@ void kl_comp_close_after_output(struct KlHttpServer *s, KlHttpConn *c) {
     kl_comp_close(s, c);
 }
 
+/* completion_internal.h: a TLS read failed. If it is the client's clean end (its close_notify,
+ * at_eof), the client sends nothing more, as with its FIN: what is queued for it still goes, then the
+ * server's own close_notify, then the close once that is out (a close over nothing unread is a FIN,
+ * not a reset). The release cannot send the alert itself on a completion loop (nothing is posted on
+ * a closing connection), so it is written here, once. Any other failure closes now. */
+void kl_comp_tls_read_failed(struct KlHttpServer *s, KlHttpConn *c) {
+    if (!(c->tls->at_eof && c->tls->at_eof(c->tls))) { kl_comp_close(s, c); return; }
+    if (!c->tls_shutdown_sent) {
+        KlTlsResult r = c->tls->shutdown(c->tls, c->stream.fd);
+        c->tls_shutdown_sent = 1;
+        if (r == KL_TLS_WANT_WRITE || r == KL_TLS_ERROR) c->tls_shutdown_abandoned = 1;
+    }
+    if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+    kl_comp_close_after_output(s, c);
+}
+
 /* Read the next recv once the queued output is out (h2: no new input while output is pending), or
  * now when nothing is queued. Exported (completion_internal.h). */
 void kl_comp_recv_after_output(struct KlHttpServer *s, KlHttpConn *c) {
@@ -571,6 +597,15 @@ void kl_http_comp_tls_finish(struct KlHttpServer *s, KlHttpConn *c, int draining
     if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
     if (draining) { (void)comp_tlsq_settle(s, c); return; }
     kl_comp_close_after_output(s, c);
+}
+
+/* completion_http.h: a connection that entered the lingering half-close (kl_http_conn_begin_linger)
+ * with output possibly still queued, or still in its TLS engine (the close_notify among it): send
+ * it, half-close once it is out (comp_tlsq_then_shutwr), and keep one receive posted, whose
+ * completion discards (the DRAINING branch of comp_on_read). A receive already posted (an HTTP/2
+ * connection reads alongside its output) is that receive. */
+void kl_http_comp_linger(struct KlHttpServer *s, KlHttpConn *c) {
+    comp_drain_receive(s, c);
 }
 
 /* Copy a plaintext response onto the (idle) output queue and mark its end: the queue posts it in
@@ -720,10 +755,7 @@ static void comp_after_state(struct KlHttpServer *s, KlHttpConn *c, KlHttpConnSt
          * retired before we got here) and SEND is half-closed. Post a recv so each completion
          * discards one bounded chunk; the idle sweep enforces the deadline. With TLS the final
          * response is still in the engine's ring: queue it; the half-close waits for it to go. */
-        c->stream.read_len = 0;
-        if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); break; }
-        if (comp_tlsq_settle(s, c)) break;
-        if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+        comp_drain_receive(s, c);
         break;
     case KL_HTTP_CONN_READING_BODY:
         comp_start_body_read(s, c);
@@ -939,7 +971,7 @@ static void comp_tls_drive_once(struct KlHttpServer *s, KlHttpConn *c) {
             if (c->stream.read_paused) return;
             if (c->comp_recv_posted) return;           /* one receive at a time */
             kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
-            if (p < 0) { kl_comp_close(s, c); return; }
+            if (p < 0) { kl_comp_tls_read_failed(s, c); return; }   /* its close_notify, or a failure */
             if (p == 0) {                              /* WANT_READ: need the network */
                 if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
                 return;
@@ -966,7 +998,7 @@ static void comp_tls_drive_once(struct KlHttpServer *s, KlHttpConn *c) {
             /* grew: read_cap increased, off (== read_len) unchanged, so space is now available */
         }
         kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf + off, c->stream.read_cap - off);
-        if (p < 0) { kl_comp_close(s, c); return; }
+        if (p < 0) { kl_comp_tls_read_failed(s, c); return; }   /* its close_notify, or a failure */
         if (p == 0) {                                  /* WANT_READ: need the network */
             if (c->comp_recv_posted) return;           /* one receive at a time */
             if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
@@ -1260,7 +1292,7 @@ static void comp_on_read(struct KlHttpServer *s, const KlCompletionEvent *ev) {
         if (c->tls->feed_input(c->tls, c->comp_cipher, ev->bytes) < 0) { kl_comp_close(s, c); return; }
         for (;;) {
             kl_ssize_t p = c->tls->read(c->tls, c->stream.fd, c->stream.read_buf, c->stream.read_cap);
-            if (p < 0) { kl_comp_close(s, c); return; }
+            if (p < 0) { kl_comp_tls_read_failed(s, c); return; }   /* its close_notify, or a failure */
             if (p == 0) break;                         /* WANT_READ */
             KlHttpConnState st = kl_http_conn_drain_ingest(c, (size_t)p, kl_monotonic_ms());
             c->stream.read_len = 0;

@@ -160,6 +160,16 @@ struct KlHttpConn {
     KlHttp1ChunkedDecoder chunked_dec;
 
     KlTls *tls;
+    int tls_shutdown_sent;      /* close_notify attempted by a drain, before its half-close (the
+                                 * release does not repeat it); delivered unless abandoned */
+    int tls_shutdown_abandoned; /* ... but not delivered: the engine refused it for good or
+                                 * returned KL_TLS_ERROR; the FIN went without it (never a clean
+                                 * TLS shutdown). The shipped OpenSSL and mbedTLS adapters map a
+                                 * shutdown error to KL_TLS_OK, so with them this records only a
+                                 * refusal given up on. */
+    int tls_shutdown_pending;   /* readiness: close_notify refused by a full socket; the half-close
+                                 * waits for it (kl_http_conn_drain_on_writable) */
+    int tls_shutdown_tries;     /* writable events that close_notify was refused on (capped) */
     int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
     char *comp_cipher;          /* Completion-mode TLS ciphertext scratch (driver-owned) */
     size_t comp_cipher_cap;
@@ -332,6 +342,35 @@ KlHttpConnState kl_http_conn_reject_head(KlHttpConn *c, const char *resp, size_t
  * send path's counterpart to kl_http_conn_reject_final). On a completion backend the caller must
  * only call this once the write is physically retired. Returns DRAINING or CLOSED. */
 KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c);
+
+/* End a connection whose protocol finished it (a done HTTP/2 session: its GOAWAY out, no stream
+ * left) without a reset: a close over unread input (the client's frames that crossed the GOAWAY) is
+ * a reset, which drops what the server's send queue still holds. So it half-closes once its output
+ * is out (TLS: close_notify first) and lingers in DRAINING, reading and discarding unframed, until
+ * the client's FIN, past the linger's cap only the hang-up, or the deadline. The caller's `kind`
+ * picks the bounds (KlHttpLingerKind), and
+ * reject_drain_disable turns it off: CLOSED then, as for a fd already gone. Readiness half-closes
+ * here; a completion-driven connection marks it for its output queue (comp_tlsq_then_shutwr), and
+ * the caller puts the queued output (and a TLS engine's) on its way and keeps a receive posted
+ * (kl_http_comp_linger). */
+typedef enum {
+    /* The protocol's last output is something the client is owed (the end of responses): the
+     * answer's bounds, max(reject_drain_max_bytes, max_body_size) and read_timeout_ms. */
+    KL_HTTP_LINGER_AFTER_OUTPUT = 0,
+    /* A timeout's notice (an idle connection's GOAWAY): the drain's short bounds,
+     * reject_drain_max_bytes and reject_drain_timeout_ms. */
+    KL_HTTP_LINGER_NOTICE
+} KlHttpLingerKind;
+KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c, KlHttpLingerKind kind);
+
+/* Readiness, DRAINING: the socket is writable. A close_notify the full socket refused when the drain
+ * began is sent now, and the half-close follows it. Returns the state (DRAINING). */
+KlHttpConnState kl_http_conn_drain_on_writable(KlHttpConn *c);
+
+/* Readiness, DRAINING: the interest to register. READ while it reads; past the linger's cap the
+ * hang-up only (`can_hangup`: the loop has KL_EVENT_CAP_HANGUP) or nothing; WRITE as well while a
+ * close_notify is still to go out. */
+KlEventMask kl_http_conn_drain_interest(const KlHttpConn *c, int can_hangup);
 
 /* One bounded, non-blocking drain read. Returns DRAINING to stay, or CLOSED on body consumed,
  * peer EOF, budget exhaustion, deadline expiry or socket error. */

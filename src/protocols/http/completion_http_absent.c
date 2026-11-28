@@ -59,6 +59,10 @@ void kl_http_comp_tls_finish(struct KlHttpServer *server, KlHttpConn *conn, int 
     (void)server; (void)conn; (void)draining; abort();
 }
 
+void kl_http_comp_linger(struct KlHttpServer *server, KlHttpConn *conn) {
+    (void)server; (void)conn; abort();
+}
+
 /* The output queue: reached only through a completion-driven connection (comp_driven, set at a
  * completion accept) or an overlapped socket provider, neither of which a readiness loop has. */
 int kl_comp_tls_flush(KlHttpConn *c) { (void)c; abort(); }

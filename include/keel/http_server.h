@@ -159,6 +159,17 @@ typedef struct KlHttpServerConfig {
      * Windows select()) wait for the deadline. It closes after read_timeout_ms at the latest (a close over unread input is a reset
      * that would drop the answer still queued in the kernel).
      *
+     * Over TLS every drain sends close_notify after the last record and before the half-close
+     * (on readiness, once a full socket takes it), so the client sees a clean TLS end.
+     *
+     * An HTTP/2 connection whose session is done (its GOAWAY out and no stream left: a graceful
+     * drain, the client's GOAWAY, a protocol error), or that the idle timeout ends after its GOAWAY,
+     * ends the same way, with the same bounds: once its output is out it sends close_notify (TLS)
+     * and half-closes, then discards what the client still sends (PING, WINDOW_UPDATE) until the
+     * client's FIN, past the cap the hang-up, or read_timeout_ms (after an idle timeout's GOAWAY:
+     * reject_drain_max_bytes and reject_drain_timeout_ms). reject_drain_disable makes it close at
+     * once instead.
+     *
      * Full contract, including why the byte-cap regression test deliberately does not assert
      * delivery: docs/contracts/early_rejection_drain.md */
     size_t   reject_drain_max_bytes;   /**< cap on post-rejection drained bytes; default 64 KiB */
@@ -507,7 +518,20 @@ void kl_http_server_stop(KlHttpServer *s);
  */
 int  kl_http_server_draining(const KlHttpServer *s);
 
-/** @brief Free all server resources (pool, router, event loop). */
+/**
+ * @brief Free all server resources (pool, router, event loop).
+ *
+ * io_uring: closing the loop's ring makes the kernel's ring teardown queue task work, with a
+ * signal notification, on every thread the ring knows, which includes the thread that created it
+ * (kl_http_server_init) even if it never submitted anything. Shortly after this call, one blocking
+ * socket call with a timeout (SO_RCVTIMEO / SO_SNDTIMEO) on that thread can therefore fail with
+ * EINTR, as for any signal (socket(7): such calls are not restarted); calls without a timeout are
+ * restarted transparently. No io_uring setup flag changes this. It is only that interruption: the
+ * kernel runs no application code for it, no Keel callback fires after the free, and the ring's
+ * posted operations are cancelled without writing to their buffers once the ring is closed. Keel's
+ * own blocking API (the sync HTTP client) is not affected: it uses non-blocking sockets and a
+ * deadline-bounded poll that treats an interruption as "not ready yet".
+ */
 void kl_http_server_free(KlHttpServer *s);
 
 /** @brief Server load statistics: read-only snapshot for load-shedding decisions. */

@@ -92,4 +92,8 @@ void kl_http_comp_post_read(KlHttpConn *conn);
  * 408), then, once it is out, half-close for the drain (`draining`) or close. */
 void kl_http_comp_tls_finish(struct KlHttpServer *server, KlHttpConn *conn, int draining);
 
+/* A connection kl_http_conn_begin_linger just moved to DRAINING: send its queued output (and a TLS
+ * engine's), half-close once it is out, and keep a receive posted to discard what still arrives. */
+void kl_http_comp_linger(struct KlHttpServer *server, KlHttpConn *conn);
+
 #endif /* KEEL_PROTOCOLS_HTTP_COMPLETION_HTTP_H */

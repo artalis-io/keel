@@ -538,7 +538,8 @@ int kl_http_server_run(KlHttpServer *s) {
                 } else if (fstate == KL_HTTP_CONN_READING) {
                     kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
                 } else if (fstate == KL_HTTP_CONN_DRAINING) {
-                    kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
+                    kl_event_mod(&s->ev.loop, fc->stream.fd, kl_http_server_drain_mask(s, fc),
+                                 &fc->stream);
                 } else if (fstate == KL_HTTP_CONN_CLOSED) {
                     kl_event_del(&s->ev.loop, fc->stream.fd);
                     kl_http_server_conn_release(s, fc);
@@ -684,8 +685,15 @@ rearm_listen:
              * EOFs, a bound is hit or the socket errors. Handled before the generic READ dispatch so
              * drained bytes are never parsed as a new request. */
             if (c->state == KL_HTTP_CONN_DRAINING) {
-                new_state = c->answer_linger_stopped ? kl_http_conn_drain_hangup(c, events[i].ready)
-                                                     : kl_http_conn_drain_step(c, kl_monotonic_ms());
+                /* Writable: a close_notify the full socket refused goes out, then the half-close.
+                 * A report that is writability alone carries nothing about the input. */
+                KlEventMask rd = (KlEventMask)(events[i].ready & ~KL_EVENT_WRITE);
+                if (events[i].ready & KL_EVENT_WRITE) (void)kl_http_conn_drain_on_writable(c);
+                if (rd)
+                    new_state = c->answer_linger_stopped ? kl_http_conn_drain_hangup(c, rd)
+                                                         : kl_http_conn_drain_step(c, kl_monotonic_ms());
+                else
+                    new_state = c->state;
                 goto transition;
             }
 
@@ -789,11 +797,8 @@ transition:
                  * deadline, so a client that simply stops sending still gets closed. */
                 /* A lingering drain past its cap reads no more: only the hang-up is watched (where
                  * the loop can), else no interest at all until the deadline. */
-                KlEventMask dm = KL_EVENT_READ;
-                if (c->answer_linger_stopped)
-                    dm = (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) ? KL_EVENT_HANGUP
-                                                                            : (KlEventMask)0;
-                if (kl_event_mod(&s->ev.loop, c->stream.fd, dm, &c->stream) < 0) {
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, kl_http_server_drain_mask(s, c),
+                                 &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s, c);
                 }

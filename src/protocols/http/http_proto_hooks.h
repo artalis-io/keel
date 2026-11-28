@@ -68,6 +68,10 @@ typedef struct KlHttp2ServerHooks {
     void (*drain_shutdown)(KlHttpConn *c);                /* graceful-drain GOAWAY */
     int  (*idle)(const KlHttpConn *c);                    /* no stream open, no output pending */
     int  (*done)(const KlHttpConn *c);                    /* session finished, or failed: close */
+    /* End a connection gracefully (a done session; an idle one after its GOAWAY): DRAINING (the
+     * lingering half-close, kl_http_conn_begin_linger), or CLOSED for a failed session (the caller
+     * closes it). */
+    KlHttpConnState (*finish)(KlHttpConn *c, int timed_out);   /* timed_out: a timeout's end */
     /* Once per loop iteration, before the wait: send output written outside the connection's
      * events, settle a failed session. settle_due: something became due since (wait zero). */
     void (*settle)(KlHttpConn *c);
