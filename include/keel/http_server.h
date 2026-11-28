@@ -518,7 +518,16 @@ void kl_http_server_stop(KlHttpServer *s);
  */
 int  kl_http_server_draining(const KlHttpServer *s);
 
-/** @brief Free all server resources (pool, router, event loop). */
+/**
+ * @brief Free all server resources (pool, router, event loop).
+ *
+ * io_uring: closing the loop's ring makes the kernel's ring teardown queue task work, with a
+ * signal notification, on every thread the ring knows, which includes the thread that created it
+ * (kl_http_server_init) even if it never submitted anything. Shortly after this call, one blocking
+ * socket call with a timeout (SO_RCVTIMEO / SO_SNDTIMEO) on that thread can therefore fail with
+ * EINTR, as for any signal (socket(7): such calls are not restarted); calls without a timeout are
+ * restarted transparently. No io_uring setup flag changes this.
+ */
 void kl_http_server_free(KlHttpServer *s);
 
 /** @brief Server load statistics: read-only snapshot for load-shedding decisions. */

@@ -42,6 +42,7 @@ typedef SOCKET CliSock;
 static void cli_close(CliSock fd) { closesocket(fd); }
 static int cli_poll(CliSock fd, int ms) { WSAPOLLFD p = { fd, POLLRDNORM, 0 }; return WSAPoll(&p, 1, ms); }
 static int sock_err(void) { return WSAGetLastError(); }
+static int cli_interrupted(void) { return WSAGetLastError() == WSAEINTR; }
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -54,6 +55,7 @@ typedef int CliSock;
 static void cli_close(CliSock fd) { close(fd); }
 static int cli_poll(CliSock fd, int ms) { struct pollfd p = { fd, POLLIN, 0 }; return poll(&p, 1, ms); }
 static int sock_err(void) { return errno; }
+static int cli_interrupted(void) { return errno == EINTR; }   /* a signal, not the 5 s timeout */
 #endif
 /* A send to a connection the server reset must fail, not raise SIGPIPE (a test of that reset). */
 #if defined(MSG_NOSIGNAL)
@@ -171,6 +173,7 @@ static int srv_wait_return(int ms) {
     return atomic_load(&g_run_returned) ? 0 : -1;
 }
 
+
 /* ── client side: a raw nghttp2 session over a socket, or OpenSSL over it ────────────────────── */
 
 typedef struct {
@@ -202,10 +205,17 @@ static ssize_t cli_send_cb(nghttp2_session *s, const uint8_t *d, size_t n, int f
 #ifdef E2E_TLS
     if (c->ssl) {
         int w = SSL_write(c->ssl, d, (int)n);
+        for (int tries = 0; w <= 0 && tries < 100; tries++) {   /* EINTR: retry, bounded */
+            int e = SSL_get_error(c->ssl, w);
+            if ((e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) || !cli_interrupted()) break;
+            w = SSL_write(c->ssl, d, (int)n);
+        }
         return w > 0 ? (ssize_t)w : NGHTTP2_ERR_CALLBACK_FAILURE;
     }
 #endif
     ssize_t w = (ssize_t)send(c->fd, (const char *)d, (int)n, CLI_SEND_FLAGS);
+    for (int tries = 0; w < 0 && cli_interrupted() && tries < 100; tries++)   /* a signal */
+        w = (ssize_t)send(c->fd, (const char *)d, (int)n, CLI_SEND_FLAGS);
     return w > 0 ? w : NGHTTP2_ERR_CALLBACK_FAILURE;
 }
 static int cli_header_cb(nghttp2_session *s, const nghttp2_frame *f, const uint8_t *name, size_t nl,
@@ -245,7 +255,10 @@ static int cli_connect(Cli *c, int port, int tls) {
     int rcv = 32 * 1024;                 /* a small receive buffer: the server's send queue fills */
     setsockopt(c->fd, SOL_SOCKET, SO_RCVBUF, (const char *)&rcv, sizeof rcv);
     /* The socket blocks (OpenSSL and nghttp2 run straight on it), so bound each call: a TLS record
-     * the server never finishes must fail the case, not hang it in SSL_read. */
+     * the server never finishes must fail the case, not hang it in SSL_read. With a timeout set,
+     * Linux does not restart a call a signal interrupts, and on io_uring freeing the previous
+     * case's server does exactly that to this thread, which created its ring (see
+     * kl_http_server_free): every call here retries EINTR, bounded. */
 #if defined(_WIN32)
     DWORD tmo = 5000;
 #else
@@ -262,7 +275,26 @@ static int cli_connect(Cli *c, int port, int tls) {
     a.sin_family = AF_INET;
     a.sin_port = htons((unsigned short)port);
     a.sin_addr.s_addr = htonl(0x7f000001u);
-    if (connect(c->fd, (struct sockaddr *)&a, sizeof a) != 0) return -1;
+    if (connect(c->fd, (struct sockaddr *)&a, sizeof a) != 0) {
+        /* Interrupted, the connection goes on in the background: wait for it, then ask. */
+        int err = sock_err();
+        if (cli_interrupted()) {
+#if defined(_WIN32)
+            WSAPOLLFD wp = { c->fd, POLLWRNORM, 0 };
+            int ready = WSAPoll(&wp, 1, 5000);
+#else
+            struct pollfd wp = { c->fd, POLLOUT, 0 };
+            int ready = poll(&wp, 1, 5000);
+#endif
+            int so = 0;
+            socklen_t sl = sizeof so;
+            err = ready == 1 && getsockopt(c->fd, SOL_SOCKET, SO_ERROR, (char *)&so, &sl) == 0 ? so : -1;
+        }
+        if (err != 0) {
+            fprintf(stderr, "  connect: error %d\n", err);
+            return -1;
+        }
+    }
 #ifdef E2E_TLS
     if (tls) {
         static SSL_CTX *cctx;
@@ -274,10 +306,27 @@ static int cli_connect(Cli *c, int port, int tls) {
             SSL_CTX_set_alpn_protos(cctx, alpn, sizeof alpn);
         }
         c->ssl = SSL_new(cctx);
-        if (!c->ssl || SSL_set_fd(c->ssl, (int)c->fd) != 1 || SSL_connect(c->ssl) != 1) return -1;
+        if (!c->ssl || SSL_set_fd(c->ssl, (int)c->fd) != 1) return -1;
+        /* Blocking, but a signal can still interrupt it (EINTR, reported as WANT_READ/WRITE):
+         * retry those, bounded. */
+        int hr = SSL_connect(c->ssl);
+        for (int tries = 0; hr != 1 && tries < 100; tries++) {
+            int e = SSL_get_error(c->ssl, hr);
+            if ((e != SSL_ERROR_WANT_READ && e != SSL_ERROR_WANT_WRITE) || !cli_interrupted()) break;
+            hr = SSL_connect(c->ssl);
+        }
+        if (hr != 1) {
+            int e = SSL_get_error(c->ssl, hr);
+            fprintf(stderr, "  SSL_connect: %d, SSL error %d, socket error %d, %s\n", hr, e, sock_err(),
+                    ERR_error_string(ERR_get_error(), NULL));
+            return -1;
+        }
         const unsigned char *p = NULL; unsigned int pl = 0;
         SSL_get0_alpn_selected(c->ssl, &p, &pl);
-        if (pl != 2 || memcmp(p, "h2", 2) != 0) return -1;
+        if (pl != 2 || memcmp(p, "h2", 2) != 0) {
+            fprintf(stderr, "  ALPN: %.*s\n", (int)pl, p ? (const char *)p : "");
+            return -1;
+        }
     }
 #else
     if (tls) return -1;
@@ -342,6 +391,7 @@ static int cli_step(Cli *c, int wait_ms) {
         if (cli_poll(c->fd, wait_ms) <= 0) return 0;
         n = (int)recv(c->fd, (char *)buf, (int)sizeof buf, 0);
         if (n == 0) { c->eof = 1; return 1; }
+        if (n < 0 && cli_interrupted()) return 0;    /* a signal: the next step reads on */
         if (n < 0) { c->reset = 1; fprintf(stderr, "  client recv error %d\n", sock_err()); return -1; }
     }
     if (nghttp2_session_mem_recv(c->ng, buf, (size_t)n) < 0) { c->reset = 1; return -1; }
@@ -357,6 +407,17 @@ static void cli_free(Cli *c) {
     c->fd = CLI_BAD;
 }
 
+/* A case that failed with its server running: stop it, wait for its run to return and free it, so
+ * the next case does not start a server over one still running. */
+static int fail_srv(const char *m, Cli *c) {
+    fail(m);
+    if (c) cli_free(c);
+    kl_http_server_stop(&g_srv);
+    kl_http_server_stop(&g_srv);       /* a second stop ends the drain at once */
+    if (srv_wait_return(20000) == 0) kl_http_server_free(&g_srv);
+    return 1;
+}
+
 /* ── cases ────────────────────────────────────────────────────────────────────────────────────── */
 
 static int case_chatty(int tls, KlTlsConfig *tlscfg) {
@@ -367,10 +428,10 @@ static int case_chatty(int tls, KlTlsConfig *tlscfg) {
                                .read_timeout_ms = 15000 };
     if (srv_start(&cfg) < 0) return fail("server start");
     Cli c;
-    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), tls) < 0) return fail("client connect");
+    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), tls) < 0) return fail_srv("client connect", &c);
     if (cli_get(&c, "/s0", 0, STREAMED_TOTAL) < 0 || cli_get(&c, "/s1", 1, STREAMED_TOTAL) < 0 ||
         cli_get(&c, "/buf", 2, BUFFERED_TOTAL) < 0)
-        return fail("submit");
+        return fail_srv("submit", &c);
 
     int rc = 0, stopped = 0;
     uint64_t t0 = now_ms(), last_ping = 0, last_wu = 0, t_stop = 0;
@@ -435,8 +496,8 @@ static int case_abandoned(void) {
                                .drain_timeout_ms = 20000, .read_timeout_ms = 1500 };
     if (srv_start(&cfg) < 0) return fail("server start");
     Cli c;
-    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), 0) < 0) return fail("client connect");
-    if (cli_get(&c, "/small", 2, 16384) < 0 || nghttp2_session_send(c.ng) != 0) return fail("submit");
+    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), 0) < 0) return fail_srv("client connect", &c);
+    if (cli_get(&c, "/small", 2, 16384) < 0 || nghttp2_session_send(c.ng) != 0) return fail_srv("submit", &c);
     nap(300);                              /* the response goes out; nobody reads it */
     uint64_t t_stop = now_ms();
     kl_http_server_stop(&g_srv);
@@ -468,8 +529,8 @@ static int case_forced(int tls, KlTlsConfig *tlscfg, int mode) {
                                .drain_timeout_ms = mode ? 20000 : 1000, .read_timeout_ms = 20000 };
     if (srv_start(&cfg) < 0) return fail("server start");
     Cli c;
-    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), tls) < 0) return fail("client connect");
-    if (cli_get(&c, "/small", 2, 16384) < 0 || nghttp2_session_send(c.ng) != 0) return fail("submit");
+    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), tls) < 0) return fail_srv("client connect", &c);
+    if (cli_get(&c, "/small", 2, 16384) < 0 || nghttp2_session_send(c.ng) != 0) return fail_srv("submit", &c);
     nap(300);                              /* answered; nobody reads it */
     uint64_t t_stop = now_ms();
     kl_http_server_stop(&g_srv);
@@ -536,22 +597,28 @@ static int case_h1_reject_tls(KlTlsConfig *tlscfg) {
     if (kl_http_server_init(&g_srv, &cfg) < 0) return fail("server init");
     kl_http_server_route(&g_srv, "POST", "/up", h1_handler, NULL, NULL);
     pthread_t tid;
-    if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) return fail("server thread");
+    if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) {
+        kl_http_server_free(&g_srv);
+        return fail("server thread");
+    }
     pthread_detach(tid);
     for (int i = 0; i < 400 && kl_http_server_bound_port(&g_srv) <= 0; i++) nap(5);
     Cli c;
-    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), 1) < 0) return fail("client connect");
+    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), 1) < 0) return fail_srv("client connect", &c);
     static const char head[] = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n";
     char body[8192];
     memset(body, 'b', sizeof body);
-    int ok = SSL_write(c.ssl, head, (int)sizeof head - 1) > 0 && SSL_write(c.ssl, body, (int)sizeof body) > 0;
+    int ok = cli_send_cb(NULL, (const uint8_t *)head, sizeof head - 1, 0, &c) > 0 &&
+             cli_send_cb(NULL, (const uint8_t *)body, sizeof body, 0, &c) > 0;   /* EINTR-safe */
     char got[4096];
     size_t n = 0;
     int clean = 0;
     while (ok && n < sizeof got) {
         int rr = SSL_read(c.ssl, got + n, (int)(sizeof got - n));
         if (rr > 0) { n += (size_t)rr; continue; }
-        clean = SSL_get_error(c.ssl, rr) == SSL_ERROR_ZERO_RETURN;   /* close_notify */
+        int e = SSL_get_error(c.ssl, rr);
+        if (e == SSL_ERROR_WANT_READ && cli_interrupted()) continue;   /* a signal: read on */
+        clean = e == SSL_ERROR_ZERO_RETURN;                            /* close_notify */
         break;
     }
     int answered = n >= 12 && memcmp(got, "HTTP/1.1 413", 12) == 0;
