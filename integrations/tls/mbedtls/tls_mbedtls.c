@@ -117,6 +117,10 @@ static int comp_ensure(unsigned char **buf, size_t *cap, size_t need,
  * These translate between mbedTLS error codes and POSIX.
  */
 
+/* Attempts a socket BIO call makes while the provider reports KL_IO_INTERRUPTED, before it
+ * reports the call as retryable instead (as the datagram send path bounds the same retry). */
+#define KL_TLS_BIO_EINTR_RETRIES 4
+
 static int bio_send(void *ctx, const unsigned char *buf, size_t len)
 {
     KlMbedtlsTls *t = (KlMbedtlsTls *)ctx;
@@ -131,15 +135,19 @@ static int bio_send(void *ctx, const unsigned char *buf, size_t len)
      * kl_sockdef_send: SIGPIPE-suppressed (MSG_NOSIGNAL) + EINTR-retried on POSIX,
      * Winsock send with its errors mapped on Windows. The failure is classified by
      * the provider (kl_sock_io_status), never by reading errno here: a provider
-     * without a hosted errno reports through its io_status op. */
-    for (;;) {
+     * without a hosted errno reports through its io_status op. An interrupted call is
+     * retried at once, a bounded number of times; one still interrupted after that is
+     * reported as WANT_WRITE (the caller re-arms), never as fatal and never as an
+     * unbounded spin. */
+    for (int attempt = 1; ; attempt++) {
         ssize_t ret = kl_sock_send(t->sp, t->fd, buf, len);
         if (ret >= 0)
             return (int)ret;
         KlIoStatus st = kl_sock_io_status(t->sp);
-        if (st == KL_IO_INTERRUPTED)
-            continue;            /* retry immediately */
-        return st == KL_IO_WOULD_BLOCK ? MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
+        if (st == KL_IO_INTERRUPTED && attempt < KL_TLS_BIO_EINTR_RETRIES)
+            continue;
+        return (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED) ? MBEDTLS_ERR_SSL_WANT_WRITE
+                                                                    : MBEDTLS_ERR_NET_SEND_FAILED;
     }
 }
 
@@ -157,8 +165,8 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
             t->in_pos = t->in_len = 0;
         return (int)n;
     }
-    /* Classified by the provider, as in bio_send. */
-    for (;;) {
+    /* Classified by the provider, as in bio_send (bounded interrupted retry). */
+    for (int attempt = 1; ; attempt++) {
         ssize_t ret = kl_sock_recv(t->sp, t->fd, buf, len);
         /* A bare TCP EOF is not a TLS close: report it as such (CONN_EOF), so a truncation is
          * not mistaken for a clean shutdown; only a real close_notify makes at_eof() true. */
@@ -167,9 +175,10 @@ static int bio_recv(void *ctx, unsigned char *buf, size_t len)
         if (ret > 0)
             return (int)ret;
         KlIoStatus st = kl_sock_io_status(t->sp);
-        if (st == KL_IO_INTERRUPTED)
-            continue;            /* retry immediately */
-        return st == KL_IO_WOULD_BLOCK ? MBEDTLS_ERR_SSL_WANT_READ : MBEDTLS_ERR_NET_RECV_FAILED;
+        if (st == KL_IO_INTERRUPTED && attempt < KL_TLS_BIO_EINTR_RETRIES)
+            continue;
+        return (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED) ? MBEDTLS_ERR_SSL_WANT_READ
+                                                                    : MBEDTLS_ERR_NET_RECV_FAILED;
     }
 }
 

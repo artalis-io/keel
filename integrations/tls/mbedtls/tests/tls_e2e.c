@@ -1292,8 +1292,23 @@ static void test_server_tls_hangup_while_suspended(KlAllocator *alloc, PemPair *
 static unsigned   g_np_calls, g_np_wouldblock, g_np_interrupted;
 static KlIoStatus g_np_last;
 
+/* What the provider does instead of the injection pattern above. */
+enum { NP_MIXED, NP_INTERRUPTED_FOREVER, NP_FATAL, NP_EOF };
+static int g_np_mode = NP_MIXED;
+
+/* 1: fail this call (-1, status in g_np_last); 2: report EOF (0); 0: do the real I/O. */
 static int np_inject(void) {
     unsigned c = g_np_calls++;
+    switch (g_np_mode) {
+    case NP_INTERRUPTED_FOREVER:
+        g_np_last = KL_IO_INTERRUPTED; g_np_interrupted++; errno = EIO; return 1;
+    case NP_FATAL:                     /* errno says "retry": only io_status may decide */
+        g_np_last = KL_IO_FATAL; errno = EAGAIN; return 1;
+    case NP_EOF:
+        return 2;
+    default:
+        break;
+    }
     if (c % 4 == 1) { g_np_last = KL_IO_WOULD_BLOCK; g_np_wouldblock++; errno = EIO; return 1; }
     if (c % 4 == 3) { g_np_last = KL_IO_INTERRUPTED; g_np_interrupted++; errno = EIO; return 1; }
     return 0;
@@ -1305,14 +1320,18 @@ static void np_classify(void) {
 }
 static kl_ssize_t np_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
     (void)ctx;
-    if (np_inject()) return -1;
+    int inj = np_inject();
+    if (inj == 1) return -1;
+    if (inj == 2) { g_np_last = KL_IO_CLOSED; errno = EPIPE; return -1; }   /* peer gone */
     kl_ssize_t r = send((int)(intptr_t)fd, buf, len, 0);
     if (r < 0) np_classify();
     return r;
 }
 static kl_ssize_t np_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     (void)ctx;
-    if (np_inject()) return -1;
+    int inj = np_inject();
+    if (inj == 1) return -1;
+    if (inj == 2) return 0;                                                 /* bare EOF */
     kl_ssize_t r = recv((int)(intptr_t)fd, buf, len, 0);
     if (r < 0) np_classify();
     return r;
@@ -1357,12 +1376,74 @@ static void test_provider_io_status_classifies(KlAllocator *alloc, PemPair *ca, 
     assert(g_np_wouldblock > 0 && g_np_interrupted > 0);
     printf("  PASS: handshake + round-trip classified by io_status, errno never consulted\n");
 
+    char b[64];
+    /* A provider that is interrupted on every call: the BIO retries a bounded number of times,
+     * then reports the call as retryable (read/write return 0), not fatal and not a spin. The
+     * session stays usable once the provider recovers. */
+    g_np_mode = NP_INTERRUPTED_FOREVER;
+    g_np_calls = 0;
+    kl_ssize_t rr = cli->read(cli, fds[0], b, sizeof b);
+    unsigned read_calls = g_np_calls;
+    g_np_calls = 0;
+    kl_ssize_t wr = cli->write(cli, fds[0], "x", 1);
+    unsigned write_calls = g_np_calls;
+    printf("  interrupted forever: read=%zd after %u calls, write=%zd after %u calls\n",
+           (ssize_t)rr, read_calls, (ssize_t)wr, write_calls);
+    assert(rr == 0 && read_calls >= 2 && read_calls <= 8);
+    assert(wr == 0 && write_calls >= 2 && write_calls <= 8);
+    g_np_mode = NP_MIXED;
+    roundtrip(srv, fds[1], cli, fds[0], "after the interruptions");
+    printf("  PASS: a provider interrupted forever is bounded and reported retryable\n");
+
+    /* A fatal provider status is fatal even when errno reads EAGAIN. */
+    g_np_mode = NP_FATAL;
+    rr = cli->read(cli, fds[0], b, sizeof b);
+    assert(rr == -1 && !cli->at_eof(cli));
+    wr = cli->write(cli, fds[0], "x", 1);
+    assert(wr == -1);
+    printf("  PASS: KL_IO_FATAL fails read and write (errno EAGAIN ignored)\n");
+    g_np_mode = NP_MIXED;
+
     cli->destroy(cli);
     srv->destroy(srv);
-    kl_tls_mbedtls_ctx_destroy(sctx);
-    kl_tls_mbedtls_ctx_destroy(cctx);
     close(fds[0]);
     close(fds[1]);
+
+    /* EOF semantics through the same provider, on a fresh pair: a close_notify followed by the
+     * transport's EOF is a clean close (read -1, at_eof 1); a bare EOF (recv 0, no close_notify) is
+     * a truncation (read -1, at_eof 0). */
+    for (int bare = 0; bare <= 1; bare++) {
+        srv = kl_tls_mbedtls_create(sctx, alloc);
+        cli = kl_tls_mbedtls_create(cctx, alloc);
+        assert(srv && cli);
+        assert(kl_tls_mbedtls_set_hostname(cli, "server.local") == 0);
+        srv->set_socket_provider(srv, &prov);
+        cli->set_socket_provider(cli, &prov);
+        assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+        assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+        assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
+        roundtrip(srv, fds[1], cli, fds[0], "before the close");
+        if (bare) {
+            g_np_mode = NP_EOF;
+        } else {
+            for (int i = 0; i < 20 && srv->shutdown(srv, fds[1]) != KL_TLS_OK; i++) { }
+            shutdown(fds[1], SHUT_WR);
+        }
+        kl_ssize_t n = 0;
+        for (int i = 0; i < 50 && (n = cli->read(cli, fds[0], b, sizeof b)) == 0; i++) { }
+        int eof = cli->at_eof(cli);
+        g_np_mode = NP_MIXED;
+        printf("  %s: read=%zd at_eof=%d\n", bare ? "bare EOF" : "close_notify", (ssize_t)n, eof);
+        assert(n == -1);
+        assert(eof == (bare ? 0 : 1));
+        cli->destroy(cli);
+        srv->destroy(srv);
+        close(fds[0]);
+        close(fds[1]);
+    }
+    printf("  PASS: close_notify is a clean EOF, a bare EOF is a truncation\n");
+    kl_tls_mbedtls_ctx_destroy(sctx);
+    kl_tls_mbedtls_ctx_destroy(cctx);
 }
 
 int main(void) {
