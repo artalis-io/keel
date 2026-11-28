@@ -1111,6 +1111,27 @@ long kl_lwr_client_recv(void *lwrctx, void *pcb, void *dst, size_t cap, int *wou
     return -1;
 }
 
+long kl_lwr_client_peek(void *lwrctx, void *pcb, void *dst, size_t cap, int *would_block) {
+    KlLwrCtx *ctx = lwrctx;
+    struct tcp_pcb *p = (struct tcp_pcb *)pcb;
+    KlLwrConn *c = lwr_conn_find(ctx, p);
+    if (would_block) *would_block = 0;
+    if (!c) {                                  /* dead/closed slot: EOF, as kl_lwr_client_recv */
+        KlLwrConn *d = lwr_client_by_fd(ctx, pcb);
+        if (d && d->is_client && (d->closed || d->dead)) return 0;
+        return -1;
+    }
+    if (!c->is_client) return -1;
+    if (c->rx_queued > 0 && c->rx_head && cap > 0) {
+        size_t want = c->rx_queued < cap ? c->rx_queued : cap;
+        if (want > 0xffffu) want = 0xffffu;    /* pbuf_copy_partial u16 len */
+        return (long)pbuf_copy_partial(c->rx_head, dst, (u16_t)want, 0);   /* left queued */
+    }
+    if (c->closed || c->dead) return 0;        /* peer closed, nothing queued ahead: EOF */
+    if (would_block) *would_block = 1;         /* open, nothing yet */
+    return -1;
+}
+
 /* Synchronous send on a server-accepted (non-client) live pcb; see the header. An accepted pcb is
  * already established (post-3WHS), so no `connected` flag is set/needed; require a live slot with a
  * driver-owned KlHttpConn (owner != NULL) that is NOT a client and NOT already running the async send-

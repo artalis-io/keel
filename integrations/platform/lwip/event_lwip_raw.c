@@ -392,8 +392,18 @@ static kl_ssize_t lwr_sock_recv(void *c, KlSocketHandle fd, void *b, size_t n) {
 }
 
 /* recv_peek is unused by the async client (io_read uses .recv). Keep it a hard error. */
+/* recv_peek: an honest, non-consuming peek for a CLIENT pcb (the pooled client's test-on-borrow):
+ * the bytes at the front of its retained rx queue, 0 once the peer closed with nothing queued, or
+ * would-block (EAGAIN) while it is open and idle. A server-accepted connection has no peek here
+ * (its reads ride the completion post path): a failure (EIO), which the suspended-op sweep reads as
+ * indeterminate. */
 static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
-    (void)c; (void)fd; (void)b; (void)n; return lwr_io_fail();
+    (void)c;
+    if (!kl_handle_valid(fd)) return lwr_io_fail();
+    int wb = 0;
+    long r = kl_lwr_client_peek(kl_lwr_active_ctx(), (void *)fd, b, n, &wb);
+    if (r < 0) return wb ? lwr_io_eagain() : lwr_io_fail();
+    return (kl_ssize_t)r;
 }
 
 /* ── Datagram data-plane (KlDatagramOps) ────────────────────────────────────
