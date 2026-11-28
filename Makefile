@@ -2065,7 +2065,7 @@ decompress-miniz-test: $(KEEL_LIB)
 	@set -e; mzobj=""; \
 	for f in $(MINIZ_DIR)/*.c; do \
 	  o="integrations/codec/miniz/tests/mz_$$(basename $$f .c).o"; \
-	  $(CC) -w -g -O1 -fsanitize=address,undefined -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO -c -o "$$o" "$$f"; \
+	  $(CC) -w -g -O1 -fsanitize=address,undefined -fno-sanitize-recover=all -I$(MINIZ_DIR) -DMINIZ_NO_ARCHIVE_APIS -DMINIZ_NO_STDIO -c -o "$$o" "$$f"; \
 	  mzobj="$$mzobj $$o"; \
 	done; \
 	$(CC) -std=c11 -g -O1 -Wall -Wextra -Wpedantic -Wshadow -Wformat=2 -Werror -Wno-unused-function \

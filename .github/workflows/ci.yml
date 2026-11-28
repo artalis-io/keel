@@ -762,12 +762,13 @@ jobs:
         # Bring-your-own miniz, pinned to a release amalgamation (consistent with the BYO mbedTLS
         # build above); enrolls the L3 CRC32/ISIZE trailer tests in standing CI without making miniz
         # a core dependency. Runs against the plain core libkeel.a built above. The tests are built
-        # with clang: its UBSan also rejects arithmetic on a null pointer (NULL + 0), which GCC's
-        # does not report.
+        # with clang 18, pinned: its UBSan also rejects arithmetic on a null pointer (NULL + 0), which
+        # GCC's does not report and newer clangs no longer diagnose in C (it is defined in C2y).
         run: |
           curl -fsSL https://github.com/richgel999/miniz/releases/download/3.0.2/miniz-3.0.2.zip -o /tmp/miniz.zip
           mkdir -p "$HOME/miniz" && unzip -o -q /tmp/miniz.zip -d "$HOME/miniz"
-          make decompress-miniz-test CC=clang MINIZ_DIR="$HOME/miniz"
+          clang-18 --version
+          make decompress-miniz-test CC=clang-18 MINIZ_DIR="$HOME/miniz"
 
       - name: nghttp2 adapter, roundtrip + real-socket e2e
         timeout-minutes: 5
