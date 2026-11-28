@@ -98,6 +98,14 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   having no body. Such a value is now rejected like any other malformed `content-length`. nghttp2
   still checks the DATA received against the header, so framing was not affected; the request's
   `content_length` and the body reader chosen for it were.
+- **OpenSSL / BoringSSL / LibreSSL and mbedTLS adapters: a socket provider's `io_status` decides
+  would-block.** On a readiness loop the adapters' socket BIOs judged a failed send or receive by
+  `errno`, which a provider without a hosted errno (the socket provider contract lets it report
+  through `KlSocketOps.io_status` alone) does not set: a transient would-block failed the TLS session.
+  They now classify the failure with the provider, as the rest of Keel does: would-block waits for
+  readiness, an interrupted call is retried at once (it was fatal before, though the built-in
+  providers already retry EINTR themselves), anything else fails. Unchanged for the built-in POSIX
+  and Winsock providers and for lwIP.
 
 ## [3.6.0]
 

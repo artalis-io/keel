@@ -22,6 +22,7 @@
 
 #include <keel_tls_openssl.h>
 #include <keel/allocator.h>
+#include <keel/socket.h>
 
 #include <openssl/evp.h>
 #include <openssl/x509.h>
@@ -1614,6 +1615,90 @@ static void test_obsolete_protocol_rejected(KlAllocator *alloc, PemPair *server)
 #endif
 }
 
+/* ── A provider that reports failures only through io_status ─────── */
+
+/* A readiness socket provider with no hosted errno, as a freestanding stack has: each failure is
+ * reported only through its io_status op, and errno is left holding an unrelated value (EIO). It
+ * also injects failures ahead of the real I/O: a would-block on every fourth call from the second,
+ * and an interrupted call on every fourth from the fourth. The BIO must take its classification
+ * from the provider: a would-block retried later, an interrupted call retried at once. Reading
+ * errno instead would see EIO and fail the session. */
+static unsigned   g_np_calls, g_np_wouldblock, g_np_interrupted;
+static KlIoStatus g_np_last;
+
+static int np_inject(void) {
+    unsigned c = g_np_calls++;
+    if (c % 4 == 1) { g_np_last = KL_IO_WOULD_BLOCK; g_np_wouldblock++; errno = EIO; return 1; }
+    if (c % 4 == 3) { g_np_last = KL_IO_INTERRUPTED; g_np_interrupted++; errno = EIO; return 1; }
+    return 0;
+}
+static void np_classify(void) {
+    g_np_last = (errno == EAGAIN || errno == EWOULDBLOCK) ? KL_IO_WOULD_BLOCK
+              : errno == EINTR ? KL_IO_INTERRUPTED : KL_IO_FATAL;
+    errno = EIO;
+}
+static kl_ssize_t np_send(void *ctx, KlSocketHandle fd, const void *buf, size_t len) {
+    (void)ctx;
+    if (np_inject()) return -1;
+    kl_ssize_t r = send((int)(intptr_t)fd, buf, len, 0);
+    if (r < 0) np_classify();
+    return r;
+}
+static kl_ssize_t np_recv(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
+    (void)ctx;
+    if (np_inject()) return -1;
+    kl_ssize_t r = recv((int)(intptr_t)fd, buf, len, 0);
+    if (r < 0) np_classify();
+    return r;
+}
+static KlIoStatus np_io_status(void *ctx) { (void)ctx; return g_np_last; }
+static const KlSocketOps g_np_ops = {
+    .send = np_send, .recv = np_recv, .io_status = np_io_status, .name = "io-status-only",
+};
+
+static void test_provider_io_status_classifies(KlAllocator *alloc, PemPair *ca, PemPair *server)
+{
+    printf("== readiness BIO: would-block / interrupted come from the provider's io_status ==\n");
+    KlTlsCtx *sctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)server->cert_pem, strlen(server->cert_pem),
+        (const unsigned char *)server->key_pem, strlen(server->key_pem),
+        NULL, 0, KL_MTLS_NONE, alloc);
+    assert(sctx);
+    KlTlsCtx *cctx = kl_tls_openssl_client_ctx_create_from_buf(
+        (const unsigned char *)ca->cert_pem, strlen(ca->cert_pem), alloc);
+    assert(cctx);
+    KlTls *srv = kl_tls_openssl_create(sctx, alloc);
+    KlTls *cli = kl_tls_openssl_create(cctx, alloc);
+    assert(srv && cli);
+    assert(kl_tls_openssl_set_hostname(cli, "server.local") == 0);
+
+    KlSocketProvider prov;
+    memset(&prov, 0, sizeof prov);
+    prov.ops = &g_np_ops;
+    assert(srv->set_socket_provider && cli->set_socket_provider);
+    srv->set_socket_provider(srv, &prov);
+    cli->set_socket_provider(cli, &prov);
+
+    int fds[2];
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
+    assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
+    g_np_calls = g_np_wouldblock = g_np_interrupted = 0;
+    assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
+    roundtrip(cli, fds[0], srv, fds[1], "through an io_status-only provider");
+    roundtrip(srv, fds[1], cli, fds[0], "and back");
+    printf("  injected: %u would-block, %u interrupted (of %u calls)\n",
+           g_np_wouldblock, g_np_interrupted, g_np_calls);
+    assert(g_np_wouldblock > 0 && g_np_interrupted > 0);
+    printf("  PASS: handshake + round-trip classified by io_status, errno never consulted\n");
+
+    cli->destroy(cli);
+    srv->destroy(srv);
+    kl_tls_openssl_ctx_destroy(sctx);
+    kl_tls_openssl_ctx_destroy(cctx);
+    close(fds[0]);
+    close(fds[1]);
+}
+
 int main(void) {
     srand(1234);
     KlAllocator alloc = kl_allocator_default();
@@ -1652,6 +1737,7 @@ int main(void) {
     test_error_queue_discipline(&alloc, &ca, &server);
     test_comp_large_write(&alloc, &ca, &server);
     test_drain_style_retry(&alloc, &ca, &server);
+    test_provider_io_status_classifies(&alloc, &ca, &server);
 
     EVP_PKEY_free(ca_key);
     X509_free(ca_crt);

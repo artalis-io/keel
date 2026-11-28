@@ -25,8 +25,8 @@
 #include "keel_tls_openssl.h"
 
 /* The socket seam: BIO I/O goes through kl_sock_send/kl_sock_recv (POSIX +
- * Winsock, with EINTR-retry, SIGPIPE suppression, and errno translation), and
- * this also supplies inet_ntop/AF_INET (SAN formatting) + KlSocketHandle.
+ * Winsock, with EINTR-retry, SIGPIPE suppression, and error classification via
+ * kl_sock_io_status), and this also supplies inet_ntop/AF_INET (SAN formatting) + KlSocketHandle.
  * Included before the OpenSSL headers so, on Windows, winsock2.h precedes any
  * windows.h an OpenSSL header might pull in. */
 #include "socket.h"
@@ -41,7 +41,6 @@
 #include <openssl/sha.h>
 #include <openssl/asn1.h>
 
-#include <errno.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -158,17 +157,21 @@ static int kl_bio_write(BIO *bio, const char *buf, int len)
     }
 
     /* readiness: kl_sock_send routes through t->sp (or kl_sockdef_send when
-     * NULL): SIGPIPE-suppressed + EINTR-retried on POSIX, Winsock errno-mapped
-     * on Windows, so the EAGAIN/EWOULDBLOCK check below works on both. */
-    ssize_t ret = kl_sock_send(t->sp, t->fd, buf, n);
-    if (ret < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+     * NULL): SIGPIPE-suppressed + EINTR-retried on POSIX, Winsock errors mapped
+     * on Windows. The failure is classified by the provider (kl_sock_io_status),
+     * never by reading errno here: a provider without a hosted errno reports
+     * through its io_status op. */
+    for (;;) {
+        ssize_t ret = kl_sock_send(t->sp, t->fd, buf, n);
+        if (ret >= 0)
+            return (int)ret;
+        KlIoStatus st = kl_sock_io_status(t->sp);
+        if (st == KL_IO_INTERRUPTED)
+            continue;            /* retry immediately */
+        if (st == KL_IO_WOULD_BLOCK)
             BIO_set_retry_write(bio);
-            return -1;
-        }
-        return -1;   /* fatal, no retry flag */
+        return -1;               /* without the retry flag: fatal */
     }
-    return (int)ret;
 }
 
 static int kl_bio_read(BIO *bio, char *buf, int len)
@@ -193,17 +196,20 @@ static int kl_bio_read(BIO *bio, char *buf, int len)
         return (int)nn;
     }
 
-    ssize_t ret = kl_sock_recv(t->sp, t->fd, buf, cap);
-    if (ret < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    /* Classified by the provider, as in kl_bio_write. */
+    for (;;) {
+        ssize_t ret = kl_sock_recv(t->sp, t->fd, buf, cap);
+        /* ret == 0: peer closed the transport, clean EOF. A 0 return from a source
+         * BIO signals EOF to OpenSSL (SSL_read → SSL_ERROR_ZERO_RETURN / -1). */
+        if (ret >= 0)
+            return (int)ret;
+        KlIoStatus st = kl_sock_io_status(t->sp);
+        if (st == KL_IO_INTERRUPTED)
+            continue;            /* retry immediately */
+        if (st == KL_IO_WOULD_BLOCK)
             BIO_set_retry_read(bio);
-            return -1;
-        }
-        return -1;   /* fatal, no retry flag */
+        return -1;               /* without the retry flag: fatal */
     }
-    /* ret == 0: peer closed the transport, clean EOF. A 0 return from a source
-     * BIO signals EOF to OpenSSL (SSL_read → SSL_ERROR_ZERO_RETURN / -1). */
-    return (int)ret;
 }
 
 static long kl_bio_ctrl(BIO *bio, int cmd, long larg, void *parg)
