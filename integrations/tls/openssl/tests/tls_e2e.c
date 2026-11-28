@@ -1803,7 +1803,10 @@ static void test_provider_io_status_classifies(KlAllocator *alloc, PemPair *ca, 
             assert(n == -1 && calls == 16);
         }
         g_np_mode = NP_MIXED;
-        printf("  %s: result %zd, at_eof %d, provider calls %u\n", cname[c], (ssize_t)n, eof, calls);
+        if (c >= C_INTR_READ)
+            printf("  %s: result %zd, provider calls %u\n", cname[c], (ssize_t)n, calls);
+        else
+            printf("  %s: result %zd, at_eof %d\n", cname[c], (ssize_t)n, eof);
         cli->destroy(cli);
         srv->destroy(srv);
         close(fds[0]);
