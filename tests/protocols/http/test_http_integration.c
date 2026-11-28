@@ -2005,10 +2005,10 @@ UTEST(integration, paused_body_client_gone_frees_a_clean_slot) {
     }
 
     /* The body deadline must reclaim that slot. */
-    int active = -1;
+    int active = -1, probe_failed = 0;
     for (int i = 0; i < 40; i++) {
         KlHttpServerStats st;
-        (void)kl_test_stats_probe_get(&probe, &st);
+        if (kl_test_stats_probe_get(&probe, &st) != 0) probe_failed = 1;
         active = st.active_connections;
         if (active == 0) break;
         kl_test_sleep_ms(100);
@@ -2032,6 +2032,7 @@ UTEST(integration, paused_body_client_gone_frees_a_clean_slot) {
     kl_plat_thread_join(&tid);
     kl_test_stats_probe_free(&probe);
     kl_http_server_free(&pause_slot_server);
+    ASSERT_EQ(probe_failed, 0);                    /* the loop answered every probe */
 
     ASSERT_EQ(active, 0);
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);

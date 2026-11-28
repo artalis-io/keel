@@ -1056,11 +1056,11 @@ UTEST(stream_termination, a_non_reading_client_of_a_committed_answer_ends_by_the
     uint64_t t0 = kl_monotonic_ms();
     kl_test_sleep_ms(400);
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&g_probe, &st);
+    int probe_failed = kl_test_stats_probe_get(&g_probe, &st) != 0;
     int held = st.active_connections;
     uint64_t t1 = t0;
     for (;;) {
-        (void)kl_test_stats_probe_get(&g_probe, &st);
+        if (kl_test_stats_probe_get(&g_probe, &st) != 0) probe_failed = 1;
         t1 = kl_monotonic_ms();
         if (st.active_connections == 0 || t1 - t0 > 10000) break;
         kl_test_sleep_ms(20);
@@ -1072,6 +1072,7 @@ UTEST(stream_termination, a_non_reading_client_of_a_committed_answer_ends_by_the
     printf("  %s: send rc %d; held at 400 ms %d, released after %llu ms; first bytes %.12s\n",
            completion ? "completion" : "readiness", g_committed_rc, held,
            (unsigned long long)(t1 - t0), n > 0 ? head : "");
+    EXPECT_EQ(probe_failed, 0);                  /* the loop answered every probe */
     EXPECT_EQ(st.active_connections, 0);
     EXPECT_LT(t1 - t0, (uint64_t)4000);              /* the idle timeout, plus the sweep's tick */
     if (completion) {
@@ -1725,11 +1726,11 @@ static int built_in_is_completion(void) {
 static int wait_active(int want, int ms) {
     KlHttpServerStats st;
     for (int i = 0; i * 10 < ms; i++) {
-        (void)kl_test_stats_probe_get(&g_probe, &st);
+        if (kl_test_stats_probe_get(&g_probe, &st) != 0) return -1;   /* the loop did not answer */
         if (st.active_connections == want) return want;
         kl_test_sleep_ms(10);
     }
-    (void)kl_test_stats_probe_get(&g_probe, &st);
+    if (kl_test_stats_probe_get(&g_probe, &st) != 0) return -1;
     return st.active_connections;
 }
 

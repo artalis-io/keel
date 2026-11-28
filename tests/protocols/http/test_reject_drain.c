@@ -698,10 +698,10 @@ static void body_with_headers_case(int *utest_result, const char *path) {
     /* The client sees EOF at once either way (the drain half-closes); what differs is how long the
      * server holds the connection. Keep the client's end open and time the server's release. */
     uint64_t t0 = kl_monotonic_ms();
-    int active = -1;
+    int active = -1, probe_failed = 0;
     for (int i = 0; i < 300; i++) {
         KlHttpServerStats st;
-        (void)kl_test_stats_probe_get(&rd_probe, &st);
+        if (kl_test_stats_probe_get(&rd_probe, &st) != 0) probe_failed = 1;
         active = st.active_connections;
         if (active == 0) break;
         kl_test_sleep_ms(10);
@@ -709,6 +709,7 @@ static void body_with_headers_case(int *utest_result, const char *path) {
     uint64_t elapsed = kl_monotonic_ms() - t0;
     kl_test_closesock(fd);
     rd_stop();
+    ASSERT_EQ(probe_failed, 0);                    /* the loop answered every probe */
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
     ASSERT_EQ(active, 0);
     ASSERT_LT(elapsed, (uint64_t)1000);              /* was ~2000: drained to the deadline */

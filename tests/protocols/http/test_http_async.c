@@ -1072,10 +1072,11 @@ UTEST(async, complete_inside_the_handler_sends_one_response) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&end_probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&end_probe, &st);
     int served = end_hellos(port);
     end_stop();
     ASSERT_EQ(responses, 1);                               /* was 2 (keep-alive): a phantom response */
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);
     ASSERT_EQ(served, 4);                                  /* was: two accepts shared one slot */
 }
@@ -1094,11 +1095,12 @@ UTEST(async, cancel_inside_the_handler_closes_the_connection) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&end_probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&end_probe, &st);
     int cancels = g_end_cancels;
     end_stop();
     ASSERT_EQ(cancels, 1);
     ASSERT_TRUE(closed);                                   /* was: left suspended, never closed */
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);
 }
 
@@ -1116,11 +1118,12 @@ UTEST(async, a_cancelled_op_releases_its_connection) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&end_probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&end_probe, &st);
     int cancels = g_end_cancels;
     end_stop();
     ASSERT_EQ(cancels, 1);
     ASSERT_TRUE(closed);                                   /* was: the slot and fd leaked */
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);
 }
 
@@ -1164,12 +1167,13 @@ UTEST(async, a_cancel_inside_on_resume_releases_once) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&end_probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&end_probe, &st);
     int served = end_hellos(port);
     int cancels = g_end_cancels;
     end_stop();
     ASSERT_EQ(cancels, 1);
     ASSERT_TRUE(closed);
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);                   /* was: released twice */
     ASSERT_EQ(served, 4);
 }
@@ -1290,7 +1294,7 @@ static void od_case(int *utest_result, int cancel_now) {
     }
     kl_test_sleep_ms(200);
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&end_probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&end_probe, &st);
     int served = end_hellos(port);
     int cancels = g_end_cancels;
     end_stop();
@@ -1301,6 +1305,7 @@ static void od_case(int *utest_result, int cancel_now) {
     } else {
         ASSERT_TRUE(strstr(buf, "{\"od\":1}") != NULL);    /* was: overwritten by READING_BODY */
     }
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);                   /* was (cancel): released twice */
     ASSERT_EQ(served, 4);
 }
@@ -1353,12 +1358,13 @@ UTEST(async, a_connection_closed_after_a_nested_complete_leaves_the_loop) {
     kl_test_sleep_ms(800);                                 /* idle: nothing should run */
     uint64_t used = process_cpu_ms() - cpu0;
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&end_probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&end_probe, &st);
     int served = end_hellos(port);
     end_stop();
     ASSERT_TRUE(answered);
     ASSERT_TRUE(closed);
     ASSERT_LT(used, (uint64_t)300);                        /* was (poll): ~800 ms spinning */
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);
     ASSERT_EQ(served, 4);
 }
@@ -1482,10 +1488,11 @@ UTEST(async, suspend_at_dispatch_then_await_body_reads_the_whole_body) {
                          " world", "[hello world]", buf, sizeof buf);
     kl_test_sleep_ms(100);
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&end_probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&end_probe, &st);
     end_stop();
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);           /* was (readiness): no response; 408 */
     ASSERT_TRUE(ok);                                       /* was (completion): "hello" dropped */
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);
 }
 

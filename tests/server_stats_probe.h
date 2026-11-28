@@ -67,8 +67,9 @@ static inline int kl_test_stats_probe_init(KlTestStatsProbe *p, KlHttpServer *sr
     return 0;
 }
 
-/* Snapshot taken on the loop thread. Returns 0, or -1 (zeroed *out) if the loop did not answer
- * within about two seconds (the server is not running). One test thread per probe. */
+/* Snapshot taken on the loop thread. Returns 0, or -1 if the loop did not answer within about two
+ * seconds (the server is not running, or is wedged): callers must check it. *out is then filled
+ * with -1s, which no assertion on a real snapshot accepts. One test thread per probe. */
 static inline int kl_test_stats_probe_get(KlTestStatsProbe *p, KlHttpServerStats *out) {
     int before = kl_atomic_load_int(&p->seq);
     kl_wakeup_signal(&p->wk);
@@ -82,7 +83,7 @@ static inline int kl_test_stats_probe_get(KlTestStatsProbe *p, KlHttpServerStats
         }
         kl_test_sleep_ms(1);
     }
-    out->active_connections = out->max_connections = out->async_suspended = out->listen_paused = 0;
+    out->active_connections = out->max_connections = out->async_suspended = out->listen_paused = -1;
     return -1;
 }
 

@@ -871,7 +871,7 @@ UTEST(completion_output, a_send_from_on_close_after_an_abnormal_closure_is_refus
     }
     kl_test_sleep_ms(300);
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&probe, &st);
     int served = 0;
     for (int i = 0; i < 4; i++) served += hello_answered(port);
     kl_http_server_stop(&bc_srv);
@@ -880,6 +880,7 @@ UTEST(completion_output, a_send_from_on_close_after_an_abnormal_closure_is_refus
     kl_http_server_free(&bc_srv);
     ASSERT_EQ(g_bye_closes, 4);                            /* every dead client's on_close ran */
     ASSERT_EQ(g_bye_sent, 0);                              /* was 4: the frame was taken */
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);
     ASSERT_EQ(served, 4);
 }
@@ -1108,7 +1109,7 @@ UTEST(completion_output, a_suspended_connection_that_dies_is_cancelled_not_resum
     }
     kl_test_sleep_ms(1300);                                /* the pushes, then the finish */
     KlHttpServerStats st;
-    (void)kl_test_stats_probe_get(&probe, &st);
+    const int st_probe = kl_test_stats_probe_get(&probe, &st);
     int served = 0;
     for (int i = 0; i < 4; i++) served += hello_answered(port);
     kl_http_server_stop(&ds_srv);
@@ -1117,6 +1118,7 @@ UTEST(completion_output, a_suspended_connection_that_dies_is_cancelled_not_resum
     kl_http_server_free(&ds_srv);
     ASSERT_TRUE(g_ds.suspended);
     ASSERT_EQ(g_ds.resumed + g_ds.cancelled, 1);           /* exactly one end */
+    ASSERT_EQ(st_probe, 0);                              /* the loop answered the probe */
     ASSERT_EQ(st.active_connections, 0);                   /* was (completion): released twice */
     ASSERT_EQ(served, 4);
 }
