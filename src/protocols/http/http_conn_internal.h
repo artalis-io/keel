@@ -160,6 +160,7 @@ struct KlHttpConn {
     KlHttp1ChunkedDecoder chunked_dec;
 
     KlTls *tls;
+    int tls_shutdown_sent;      /* close_notify already sent (the linger, before its half-close) */
     int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
     char *comp_cipher;          /* Completion-mode TLS ciphertext scratch (driver-owned) */
     size_t comp_cipher_cap;

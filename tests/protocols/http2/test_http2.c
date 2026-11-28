@@ -16,6 +16,7 @@
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "http_internal.h"     /* kl_http_server_sweep_conn_timeouts, kl_http_server_settle_h2 */
 #include "event_caps.h"        /* kl_event_caps: is the server's loop a completion loop? */
+#include "kl_atomic.h"         /* a destroy count read from the test thread */
 #include <keel/clock.h>
 
 #if defined(_WIN32)
@@ -98,13 +99,38 @@ typedef struct {
     uint32_t last_reset_id;
     uint32_t last_reset_code;
 
+    /* A live connection's output: once recv sees done_marker, flush writes out_total bytes of a
+     * pattern through KEEL's send callback (as much as it takes each time), and the session is done
+     * (wants neither read nor write) once all of it went. live_out[i] is the i-th session's total. */
+    const char *done_marker;
+    size_t live_out[4];
+    int sessions;
+    size_t out_total, out_sent;
+    int done_after_out;
+
     /* KEEL's callbacks (stored by factory) */
     KlHttp2ServerCallbacks callbacks;
     void *cb_user_data;
 } MockH2Session;
 
+static unsigned char live_pattern(size_t i) { return (unsigned char)(i % 251u); }
+
+static int mock_has_marker(const MockH2Session *m, const void *data, size_t len) {
+    if (!m->done_marker || !data) return 0;
+    size_t ml = strlen(m->done_marker);
+    const char *d = data;
+    for (size_t i = 0; ml && i + ml <= len; i++)
+        if (memcmp(d + i, m->done_marker, ml) == 0) return 1;
+    return 0;
+}
+
 static kl_ssize_t mock_recv(KlHttp2ServerSession *self, const void *data, size_t len) {
     MockH2Session *m = (MockH2Session *)self;
+    if (mock_has_marker(m, data, len) && !m->done_after_out) {
+        m->out_total = m->live_out[(m->sessions - 1) & 3];
+        m->out_sent = 0;
+        m->done_after_out = 1;
+    }
     if (m->recv_count == 0 && data) {
         m->first_recv_len = len < sizeof(m->first_recv) ? len : sizeof(m->first_recv);
         memcpy(m->first_recv, data, m->first_recv_len);
@@ -146,7 +172,7 @@ static int mock_submit_response(KlHttp2ServerSession *self, uint32_t stream_id,
 static int mock_want_write(KlHttp2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->want_write_count++;
-    return m->want_write_return;
+    return m->want_write_return || m->out_sent < m->out_total;
 }
 
 static int mock_flush(KlHttp2ServerSession *self) {
@@ -167,12 +193,23 @@ static int mock_flush(KlHttp2ServerSession *self) {
             m->callbacks.on_stream_reset(m->cb_user_data, ids[i], 0);
         }
     }
+    while (m->out_sent < m->out_total) {
+        unsigned char chunk[4096];
+        size_t n = m->out_total - m->out_sent;
+        if (n > sizeof chunk) n = sizeof chunk;
+        for (size_t i = 0; i < n; i++) chunk[i] = live_pattern(m->out_sent + i);
+        kl_ssize_t w = m->callbacks.send(m->cb_user_data, chunk, n);
+        if (w <= 0) break;                                 /* would block: kept for the next flush */
+        m->out_sent += (size_t)w;
+    }
     if (m->on_flush) m->on_flush();
     return m->flush_return;
 }
 
 static int mock_want_read(KlHttp2ServerSession *self) {
-    return ((MockH2Session *)self)->want_read_return;
+    const MockH2Session *m = (const MockH2Session *)self;
+    if (m->done_after_out && m->out_sent >= m->out_total) return 0;   /* GOAWAY out, nothing left */
+    return m->want_read_return;
 }
 
 static int mock_shutdown(KlHttp2ServerSession *self) {
@@ -217,9 +254,11 @@ static int mock_reset_stream(KlHttp2ServerSession *self, uint32_t stream_id, uin
     return 0;
 }
 
+static int g_mock_destroys;      /* every destroy, read across threads (kl_atomic) */
 static void mock_destroy(KlHttp2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->destroy_count++;
+    kl_atomic_store_int(&g_mock_destroys, kl_atomic_load_int(&g_mock_destroys) + 1);
 }
 
 /* Global mock pointer for factory access in tests */
@@ -244,6 +283,10 @@ static KlHttp2ServerSession *mock_factory(KlAllocator *alloc,
         m->base.resume_body = m->with_stream ? mock_resume_body : NULL;
         m->base.reset_stream = m->with_stream ? mock_reset_stream : NULL;
     }
+
+    m->sessions++;
+    m->out_total = m->out_sent = 0;
+    m->done_after_out = 0;
 
     /* Store callbacks so tests can invoke them */
     m->callbacks = *callbacks;
@@ -1588,7 +1631,8 @@ UTEST(h2, sweep_ends_a_finished_session_through_the_linger) {
     kl_http_server_free(&h2_sweep_srv);
     kl_test_closesock(pfd[0]);
     test_teardown();
-    if (comp) {                         /* not driven by the completion driver here: closed as before */
+    if (comp) {    /* not completion-driven here: closed as before (a_done_session_lingers_on_the_servers_loop
+                    * covers the completion driver's linger) */
         ASSERT_EQ(destroyed, 1);
         return;
     }
@@ -2739,6 +2783,311 @@ UTEST(h2, prior_knowledge_preface_reaches_the_session_whole) {
     ASSERT_TRUE(ok);
     ASSERT_GT(got, (size_t)0);
     ASSERT_TRUE(whole);                          /* was: the session got SETTINGS, magic stripped */
+}
+
+/* ── A done session lingers on the server's own loop (readiness or completion) ─────────────── */
+/* The same linger, driven by the real loop of whichever backend this suite runs on: on a completion
+ * loop (pollcomp, io_uring, IOCP) the output goes through the connection's queue, the half-close
+ * waits for it (comp_tlsq_then_shutwr), and a posted receive discards what the client sends. Two
+ * connections, one after the other:
+ *   A: the session finishes inside a read (its output fits the queue at once): every byte arrives,
+ *      then the FIN; a frame the client sends after it is discarded, the connection stays; the
+ *      client's FIN then closes it at once.
+ *   B: the session finishes inside a send (its output is past the queue's producer bound, so it
+ *      finishes from a send completion and the sweep ends it): every byte, then the FIN; the client
+ *      never closes, and the linger's deadline (read_timeout_ms) closes it. */
+static KlHttpServer g_lg_srv;
+static MockH2Session g_lg_mock;
+static void lg_server_thread(void *arg) { (void)arg; kl_http_server_run(&g_lg_srv); }
+
+static int lg_connect(int port) {
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) { kl_test_closesock(fd); return -1; }
+    static const char preface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    (void)kl_test_sockwrite(fd, preface, 24);
+    kl_test_sleep_ms(50);                                  /* the upgrade first, then the request */
+    (void)kl_test_sockwrite(fd, "DONE!", 5);
+    return fd;
+}
+
+/* Read to the end of stream, checking the pattern. *eof: 1 clean end, -1 an error (a reset). */
+static size_t lg_read_all(int fd, int *eof, int *bad) {
+    size_t n = 0;
+    *eof = 0;
+    *bad = 0;
+    char buf[16384];
+    while (kl_test_poll1(fd, 0, 3000) > 0) {
+        long r = kl_test_sockread(fd, buf, sizeof buf);
+        if (r == 0) { *eof = 1; break; }
+        if (r < 0) { *eof = -1; break; }
+        for (long i = 0; i < r; i++)
+            if ((unsigned char)buf[i] != live_pattern(n + (size_t)i)) *bad = 1;
+        n += (size_t)r;
+    }
+    return n;
+}
+
+/* Milliseconds until `want` sessions were destroyed (their connections released), or -1. */
+static long lg_wait_destroys(int want, int max_ms) {
+    uint64_t t0 = kl_monotonic_ms();
+    while (kl_atomic_load_int(&g_mock_destroys) < want) {
+        if (kl_monotonic_ms() - t0 > (uint64_t)max_ms) return -1;
+        kl_test_sleep_ms(5);
+    }
+    return (long)(kl_monotonic_ms() - t0);
+}
+
+UTEST(h2, a_done_session_lingers_on_the_servers_loop) {
+    test_setup();
+    mock_init(&g_lg_mock);
+    g_lg_mock.with_want_read = 1;
+    g_lg_mock.want_read_return = 1;
+    g_lg_mock.done_marker = "DONE!";
+    g_lg_mock.live_out[0] = 256u * 1024u;                  /* within the completion queue's bound */
+    g_lg_mock.live_out[1] = 3u * 1024u * 1024u;            /* past it */
+    g_mock_session = &g_lg_mock;
+    kl_atomic_store_int(&g_mock_destroys, 0);
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .h2 = &test_h2_cfg,
+                               .read_timeout_ms = 1500, .max_connections = 4 };
+    ASSERT_EQ(kl_http_server_init(&g_lg_srv, &cfg), 0);
+    KlPlatThread t;
+    kl_plat_thread_create(&t, lg_server_thread, NULL);
+    for (int i = 0; i < 200 && g_lg_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+
+    /* A: finished by a read, ended by the client's FIN. */
+    int eof_a = 0, bad_a = 0;
+    int fd = lg_connect(g_lg_srv.bound_port);
+    size_t got_a = fd >= 0 ? lg_read_all(fd, &eof_a, &bad_a) : 0;
+    if (fd >= 0) (void)kl_test_sockwrite(fd, "\0\0\x08\x06\0\0\0\0\0PINGPING", 17);   /* crosses it */
+    kl_test_sleep_ms(200);
+    int lingering_a = kl_atomic_load_int(&g_mock_destroys) == 0;
+    if (fd >= 0) shutdown(fd, T_SHUT_WR);                  /* the client's FIN */
+    long fin_close_ms = lg_wait_destroys(1, 3000);
+    if (fd >= 0) kl_test_closesock(fd);
+
+    /* B: finished by a send, never closed by the client: the deadline ends it. */
+    int eof_b = 0, bad_b = 0;
+    fd = lg_connect(g_lg_srv.bound_port);
+    size_t got_b = fd >= 0 ? lg_read_all(fd, &eof_b, &bad_b) : 0;
+    kl_test_sleep_ms(300);
+    int lingering_b = kl_atomic_load_int(&g_mock_destroys) == 1;
+    long deadline_close_ms = lg_wait_destroys(2, 5000);
+    if (fd >= 0) kl_test_closesock(fd);
+
+    kl_http_server_stop(&g_lg_srv);
+    kl_plat_thread_join(&t);
+    kl_http_server_free(&g_lg_srv);
+    test_teardown();
+    ASSERT_EQ(got_a, (size_t)(256u * 1024u));              /* every byte */
+    ASSERT_EQ(bad_a, 0);
+    ASSERT_EQ(eof_a, 1);                                   /* then the FIN, not a reset */
+    ASSERT_TRUE(lingering_a);                              /* was closed: the frame would reset it */
+    ASSERT_TRUE(fin_close_ms >= 0 && fin_close_ms < 800);  /* the FIN, not the deadline, ended it */
+    ASSERT_EQ(got_b, (size_t)(3u * 1024u * 1024u));
+    ASSERT_EQ(bad_b, 0);
+    ASSERT_EQ(eof_b, 1);
+    ASSERT_TRUE(lingering_b);
+    ASSERT_TRUE(deadline_close_ms >= 700);                 /* held to its deadline (1500 ms) ... */
+    ASSERT_TRUE(deadline_close_ms >= 0 && deadline_close_ms < 4000);   /* ... and closed by it */
+}
+
+/* The same over TLS. A clear-text stand-in engine: records pass through unchanged, and its
+ * close_notify is the 4 bytes "<CN>", which its read reports as a clean end (at_eof) when the client
+ * sends them. It does both transports: the socket on a readiness loop, the feed_input/drain_output
+ * buffers on a completion loop. */
+#define LTLS_CN "<CN>"
+typedef struct {
+    KlTls base;
+    int comp, eof, cn_sent;
+    char *in;  size_t in_len, in_cap;
+    char *out; size_t out_len, out_cap;
+} LiveTls;
+static KlTlsResult livetls_handshake(KlTls *self, KlSocketHandle fd) { (void)self; (void)fd; return KL_TLS_OK; }
+static const char *livetls_alpn(KlTls *self) { (void)self; return "h2"; }
+static kl_ssize_t livetls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
+    LiveTls *t = (LiveTls *)self;
+    if (t->eof) return -1;
+    if (!t->comp) {
+        long r = kl_test_sockread(fd, buf, len);
+        if (r == 0) { t->eof = 1; return -1; }
+        if (r < 0) return 0;                               /* would block (a readiness read) */
+        if (r >= 4 && memcmp(buf, LTLS_CN, 4) == 0) { t->eof = 1; return -1; }
+        return (kl_ssize_t)r;
+    }
+    if (t->in_len == 0) return 0;                          /* WANT_READ */
+    if (t->in_len >= 4 && memcmp(t->in, LTLS_CN, 4) == 0) { t->eof = 1; return -1; }
+    size_t n = t->in_len < len ? t->in_len : len;
+    memcpy(buf, t->in, n);
+    memmove(t->in, t->in + n, t->in_len - n);
+    t->in_len -= n;
+    return (kl_ssize_t)n;
+}
+static kl_ssize_t livetls_put(LiveTls *t, KlSocketHandle fd, const void *buf, size_t len) {
+    if (!t->comp) {
+        long w = kl_test_sockwrite(fd, buf, len);
+        return w < 0 ? 0 : (kl_ssize_t)w;                  /* a full socket: retried */
+    }
+    if (len > t->out_cap - t->out_len) return 0;
+    memcpy(t->out + t->out_len, buf, len);
+    t->out_len += len;
+    return (kl_ssize_t)len;
+}
+static kl_ssize_t livetls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
+    return livetls_put((LiveTls *)self, fd, buf, len);
+}
+static int g_livetls_shutdowns;   /* every shutdown call (the server thread; read after join) */
+static KlTlsResult livetls_shutdown(KlTls *self, KlSocketHandle fd) {
+    LiveTls *t = (LiveTls *)self;
+    g_livetls_shutdowns++;
+    if (!t->cn_sent && livetls_put(t, fd, LTLS_CN, 4) == 4) t->cn_sent = 1;   /* sent once */
+    return KL_TLS_OK;
+}
+static size_t livetls_pending(KlTls *self) { (void)self; return 0; }
+static void livetls_reset(KlTls *self) {
+    LiveTls *t = (LiveTls *)self;
+    t->comp = t->eof = t->cn_sent = 0;
+    t->in_len = t->out_len = 0;
+}
+static void livetls_destroy(KlTls *self) {
+    LiveTls *t = (LiveTls *)self;
+    free(t->in);
+    free(t->out);
+    free(t);
+}
+static int livetls_feed(KlTls *self, const void *cipher, size_t len) {
+    LiveTls *t = (LiveTls *)self;
+    t->comp = 1;
+    if (!cipher) return 0;
+    if (len > t->in_cap - t->in_len) return -1;
+    memcpy(t->in + t->in_len, cipher, len);
+    t->in_len += len;
+    return 0;
+}
+static kl_ssize_t livetls_drain(KlTls *self, void *buf, size_t cap) {
+    LiveTls *t = (LiveTls *)self;
+    size_t n = t->out_len < cap ? t->out_len : cap;
+    memcpy(buf, t->out, n);
+    memmove(t->out, t->out + n, t->out_len - n);
+    t->out_len -= n;
+    return (kl_ssize_t)n;
+}
+static int livetls_at_eof(KlTls *self) { return ((LiveTls *)self)->eof; }
+static KlTls *livetls_factory(KlTlsCtx *ctx, KlAllocator *alloc) {
+    (void)ctx; (void)alloc;
+    LiveTls *t = calloc(1, sizeof *t);
+    if (!t) return NULL;
+    t->in_cap = 1u << 20;
+    t->out_cap = 1u << 20;
+    t->in = malloc(t->in_cap);
+    t->out = malloc(t->out_cap);
+    if (!t->in || !t->out) { free(t->in); free(t->out); free(t); return NULL; }
+    t->base.handshake = livetls_handshake;
+    t->base.read = livetls_read;
+    t->base.write = livetls_write;
+    t->base.shutdown = livetls_shutdown;
+    t->base.pending = livetls_pending;
+    t->base.reset = livetls_reset;
+    t->base.destroy = livetls_destroy;
+    t->base.alpn_protocol = livetls_alpn;
+    t->base.feed_input = livetls_feed;
+    t->base.drain_output = livetls_drain;
+    t->base.at_eof = livetls_at_eof;
+    return &t->base;
+}
+
+/* Read to the end of stream: `want` pattern bytes, then the engine's close_notify. */
+static int lg_read_tls(int fd, size_t want, size_t *got, int *eof) {
+    size_t n = 0;
+    char tail[8];
+    size_t tl = 0;
+    int bad = 0;
+    *eof = 0;
+    char buf[16384];
+    while (kl_test_poll1(fd, 0, 3000) > 0) {
+        long r = kl_test_sockread(fd, buf, sizeof buf);
+        if (r == 0) { *eof = 1; break; }
+        if (r < 0) { *eof = -1; break; }
+        for (long i = 0; i < r; i++, n++) {
+            if (n < want) { if ((unsigned char)buf[i] != live_pattern(n)) bad = 1; }
+            else if (tl < sizeof tail) tail[tl++] = buf[i];
+        }
+    }
+    *got = n < want ? n : want;
+    return !bad && tl == 4 && memcmp(tail, LTLS_CN, 4) == 0;   /* then close_notify, alone */
+}
+
+/* Over TLS on the server's own loop: the output, then close_notify, then the FIN. And on a completion
+ * loop, a client close_notify that arrives while the end of the answer is still queued (the client
+ * stopped reading for a moment) must not cancel that output: it is the client's FIN in TLS, and the
+ * connection closes once what is queued has gone, as for a FIN. (A readiness loop's linger reads
+ * raw bytes past its half-close, so it never decodes the client's close_notify.) */
+static KlHttpServer g_lt_srv;
+static void lt_server_thread(void *arg) { (void)arg; kl_http_server_run(&g_lt_srv); }
+UTEST(h2, a_done_tls_session_lingers_on_the_servers_loop) {
+    test_setup();
+    mock_init(&g_lg_mock);
+    g_lg_mock.with_want_read = 1;
+    g_lg_mock.want_read_return = 1;
+    g_lg_mock.done_marker = "DONE!";
+    g_lg_mock.live_out[0] = 256u * 1024u;
+    g_lg_mock.live_out[1] = 900u * 1024u;                  /* more than the sockets hold, within
+                                                             * the completion queue's bound */
+    g_mock_session = &g_lg_mock;
+    kl_atomic_store_int(&g_mock_destroys, 0);
+    g_livetls_shutdowns = 0;
+    static int dummy_ctx;
+    KlTlsConfig tls = { .ctx = (KlTlsCtx *)&dummy_ctx, .factory = livetls_factory };
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .h2 = &test_h2_cfg, .tls = &tls,
+                               .read_timeout_ms = 1500, .max_connections = 2 };
+    ASSERT_EQ(kl_http_server_init(&g_lt_srv, &cfg), 0);
+    int comp = (kl_event_caps(&g_lt_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    KlPlatThread t;
+    kl_plat_thread_create(&t, lt_server_thread, NULL);
+    for (int i = 0; i < 200 && g_lt_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+
+    /* A: the output, close_notify, the FIN. */
+    size_t got_a = 0;
+    int eof_a = 0;
+    int fd = lg_connect(g_lt_srv.bound_port);
+    int whole_a = fd >= 0 && lg_read_tls(fd, 256u * 1024u, &got_a, &eof_a);
+    if (fd >= 0) kl_test_closesock(fd);
+    long closed_a = lg_wait_destroys(1, 3000);
+
+    /* B (completion): the client's close_notify crosses the queued end of the answer. */
+    size_t got_b = 0;
+    int eof_b = 0, whole_b = 1;
+    long closed_b = 0;
+    if (comp) {
+        fd = lg_connect(g_lt_srv.bound_port);
+        kl_test_sleep_ms(300);                             /* done; the end still queued */
+        if (fd >= 0) (void)kl_test_sockwrite(fd, LTLS_CN, 4);
+        kl_test_sleep_ms(100);
+        whole_b = fd >= 0 && lg_read_tls(fd, 900u * 1024u, &got_b, &eof_b);
+        if (fd >= 0) kl_test_closesock(fd);
+        closed_b = lg_wait_destroys(2, 3000);
+    }
+
+    kl_http_server_stop(&g_lt_srv);
+    kl_plat_thread_join(&t);
+    kl_http_server_free(&g_lt_srv);
+    test_teardown();
+    ASSERT_EQ(got_a, (size_t)(256u * 1024u));
+    ASSERT_TRUE(whole_a);                                  /* every byte, then close_notify */
+    ASSERT_EQ(eof_a, 1);                                   /* then the FIN */
+    ASSERT_TRUE(closed_a >= 0);
+    ASSERT_EQ(g_livetls_shutdowns, comp ? 2 : 1);          /* once per connection, not again at release */
+    if (comp) {
+        ASSERT_EQ(got_b, (size_t)(900u * 1024u));          /* was cut off by the client's close_notify */
+        ASSERT_TRUE(whole_b);
+        ASSERT_EQ(eof_b, 1);
+        ASSERT_TRUE(closed_b >= 0);
+    }
 }
 
 /* ── A session whose flush reports the stream it just finished as closed ───────────────────── */

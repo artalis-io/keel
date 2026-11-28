@@ -21,7 +21,7 @@
  *     still end at the linger deadline (read_timeout_ms), so the run returns then, well before the
  *     drain deadline, with no connection left.
  * With -DE2E_TLS (and the OpenSSL adapter linked) the chatty case also runs over real TLS (ALPN h2,
- * an OpenSSL client): the bytes must arrive whole before the end of stream.
+ * an OpenSSL client): the bytes must arrive whole, then the server's close_notify, then the FIN.
  * Exits non-zero on any failure.
  */
 #include <keel/keel.h>
@@ -400,6 +400,7 @@ static int case_chatty(int tls, KlTlsConfig *tlscfg) {
     if (reset) rc = fail("the connection failed (a reset: the tail of the responses dropped)");
     if (!eof) rc = fail("no end of stream after the drain");
     if (!goaway) rc = fail("no GOAWAY");
+    if (tls && eof && !tls_clean) rc = fail("the TLS end was no close_notify (a truncation)");
     for (int k = 0; k < 2; k++)
         if (atomic_load(&g_prod[k].closed) != 1 || atomic_load(&g_prod[k].completed) != 1 ||
             atomic_load(&g_prod[k].wrote_after_close))

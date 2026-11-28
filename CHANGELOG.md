@@ -145,7 +145,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   discards what the client still sends until the client's FIN, past `max(reject_drain_max_bytes,
   max_body_size)` only the hang-up, or `read_timeout_ms`; `reject_drain_disable` turns this off. A
   client that never closes holds the slot (and a draining server) for up to `read_timeout_ms`, or
-  the drain deadline, whichever comes first.
+  the drain deadline, whichever comes first. On a completion loop, a client's close_notify during
+  that linger (or after a rejected request's answer) no longer cancels output still queued for it
+  (the end of the answer, the server's own close_notify): it closes once that output is out, as for
+  the client's FIN.
 - **HTTP/2 on readiness loops: a session done outside its connection's events closed a second
   late.** A session that finished in the drain's GOAWAY flush or the settle pass was left until the
   next wait timed out (about one second), so every drain of a server with an HTTP/2 connection took

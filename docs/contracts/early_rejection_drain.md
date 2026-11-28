@@ -90,6 +90,37 @@ after the client's FIN, when nothing new can arrive: the total read for such a r
 `reject_drain_max_bytes` + max(`reject_drain_max_bytes`, `max_body_size`) + two receive windows, plus
 what was already buffered when a FIN is seen.
 
+### A finished HTTP/2 connection
+
+The same linger ends an HTTP/2 connection whose session is **done**: it wants neither to read nor to
+write, because its GOAWAY is out and no stream is left (a graceful drain, the client's GOAWAY, a
+GOAWAY for a protocol error). HTTP/2 clients keep sending while they receive (PING, WINDOW_UPDATE,
+SETTINGS acknowledgements), so closing such a connection at once is usually a close over unread
+input: a reset that drops the tail of responses the server already counted as sent (and reported
+`completed` 1 to a streamed producer). So, instead of closing (`kl_http_conn_begin_linger`):
+
+- **Once its output is out** (readiness: handed to the kernel, which is when the session is done;
+  completion: once the output queue has sent everything, `comp_tlsq_then_shutwr`) it half-closes.
+  Over TLS, close_notify goes first, after the last record, and the release does not send it
+  again. On readiness that close_notify is best effort: a full send buffer can leave it unsent or
+  partly written, which the half-close then cuts off, so the client sees a truncated TLS end after
+  records that all arrived whole.
+- It then reads and **discards, unframed**: what follows is no request, so no framing ends it, and
+  nothing is parsed. It ends at the client's FIN (readiness reads it; completion keeps one receive
+  posted, whose end of stream closes the connection once anything still queued has gone), at the
+  client's close_notify on a completion loop (a clean TLS end, at_eof: the same as its FIN), past
+  max(`reject_drain_max_bytes`, `max_body_size`) as above (reading stops, only the hang-up is
+  watched), or at `read_timeout_ms` after it began: a client that never closes, or never reads,
+  holds its slot (and a draining server) that long at most, or until the drain deadline of
+  `kl_http_server_stop`, whichever comes first.
+- `reject_drain_disable` turns it off: a done session then closes at once, as before the linger.
+- A failed session (its transport broke) closes at once; an idle HTTP/2 connection the idle sweep
+  times out still closes after its GOAWAY.
+
+The deadline is checked by the timeout sweep, which runs once per loop iteration, and a loop with
+nothing to do waits up to about a second per iteration: a linger can end up to about a second past
+its deadline.
+
 ## Ownership
 
 One internal entry point owns the whole transition, so no rejection site carries teardown policy
