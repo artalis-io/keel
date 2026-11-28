@@ -229,5 +229,5 @@ echo "=== serial output end ==="
 
 echo "=== grep markers ==="
 grep -E 'U-4:|HTTP/1\.[01]' /tmp/serial_u4.log || echo "(no U-4 markers found)"
-echo "=== s_server log tail ==="
-tail -5 /tmp/sserver_u4.log 2>/dev/null || true
+echo "=== TLS responder log tail ==="
+tail -5 /tmp/tlsd_u4.log 2>/dev/null || true
