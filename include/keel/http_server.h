@@ -519,6 +519,15 @@ typedef struct {
 
 /**
  * @brief Populate a stats snapshot from current server state.
+ *
+ * Thread: loop thread only. Call it from the thread running kl_http_server_run (a handler,
+ * middleware, watcher, timer or thread-pool done_fn), or when no run is in progress: before
+ * kl_http_server_run starts, or after it has returned (from a thread that joined the run's
+ * thread). It reads state the loop changes without synchronization and walks the
+ * suspended-operation list, whose entries the loop unlinks and their owners free, so a call from
+ * another thread during a run is a data race and can read freed memory. To watch the load from elsewhere, take the snapshot on the
+ * loop (a timer, say) and publish it with your own synchronization.
+ *
  * @param s    Server instance (may be NULL, zeroes out).
  * @param out  Output struct (may be NULL, no-op).
  */
@@ -548,6 +557,14 @@ const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s);
  *
  * Ownership: none (returns a value). Lifetime: meaningful once the listener is bound (0 before
  * binding). NULL: returns -1 when @p s is NULL (deterministic).
+ *
+ * Thread: the port is written once, by kl_http_server_run on its own thread when it binds the
+ * listener, before the first connection is accepted, and never written again. That thread may read
+ * it at any time (from a handler, say). Another thread may read it once something orders the read
+ * after that write: kl_http_server_run has returned (the thread was joined), or the loop thread
+ * published "listening" through the caller's own synchronization (a mutex, an atomic flag or a
+ * condition variable set from a callback). Polling it from another thread while the run starts is a
+ * data race; the value is a plain int, not an atomic.
  */
 int kl_http_server_bound_port(const KlHttpServer *s);
 
