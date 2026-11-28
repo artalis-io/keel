@@ -449,8 +449,8 @@ UTEST(wsc_peer, large_101_in_one_tls_record_completes_the_handshake) {
     size_t len_101 = strlen("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                             "Connection: Upgrade\r\nSec-WebSocket-Accept: ") + 28 + 2 +
                      strlen(extra) + 2;
-    mock_tls_split_after = 0;                                  /* the first record is the 101 */
-    mock_tls_split_record = len_101;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));                                  /* the first record is the 101 */
+    kl_atomic_store_int(&mock_tls_split_record, (int)(len_101));
 
     Cli c; memset(&c, 0, sizeof c);
     KlAllocator a = kl_allocator_default();
@@ -476,8 +476,8 @@ UTEST(wsc_peer, large_101_in_one_tls_record_completes_the_handshake) {
     for (int i = 0; i < 5; i++) (void)kl_event_ctx_run(&ev, 16, 1);
     kl_event_ctx_free(&ev);
     peer_finish(&p);
-    mock_tls_split_after = 0;
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
     ASSERT_EQ(opened, 1);                                      /* was 0: the handshake hung */
     (void)quarantine_check_and_release();
 }
@@ -514,7 +514,7 @@ UTEST(wsc_peer, close_then_free_with_an_unsendable_close_is_safe) {
     open_over_mock_tls(&p, &c, &ev);
     int opened = c.opened;
 
-    mock_tls_write_fail = 1;
+    kl_atomic_store_int(&mock_tls_write_fail, (int)(1));
     if (c.ws) kl_ws_client_close(c.ws, 1000, NULL, 0);
     int inside = c.errors;                                     /* on_error ran inside close */
     /* The caller frees right after close. Skipped only when on_error already freed it inside close
@@ -522,7 +522,7 @@ UTEST(wsc_peer, close_then_free_with_an_unsendable_close_is_safe) {
     if (c.ws) { kl_ws_client_free(c.ws); c.ws = NULL; }
     for (int i = 0; i < 5; i++) (void)kl_event_ctx_run(&ev, 16, 1);
     int after_free = c.errors - inside;                        /* a report after the free */
-    mock_tls_write_fail = 0;
+    kl_atomic_store_int(&mock_tls_write_fail, (int)(0));
     kl_event_ctx_free(&ev);
     peer_finish(&p);
     int written = quarantine_check_and_release();
@@ -543,14 +543,14 @@ UTEST(wsc_peer, unsendable_close_reports_the_error_from_the_loop) {
     open_over_mock_tls(&p, &c, &ev);
     int opened = c.opened;
 
-    mock_tls_write_fail = 1;
+    kl_atomic_store_int(&mock_tls_write_fail, (int)(1));
     if (c.ws) kl_ws_client_close(c.ws, 1000, NULL, 0);
     int inside = c.errors;
     for (int i = 0; i < 50 && c.ws && !c.errors; i++) (void)kl_event_ctx_run(&ev, 16, 10);
     int errors = c.errors;
     int freed = c.ws == NULL;                                  /* on_error freed it, from the loop */
     if (c.ws) { kl_ws_client_free(c.ws); c.ws = NULL; }
-    mock_tls_write_fail = 0;
+    kl_atomic_store_int(&mock_tls_write_fail, (int)(0));
     kl_event_ctx_free(&ev);
     peer_finish(&p);
     int written = quarantine_check_and_release();

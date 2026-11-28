@@ -3,6 +3,7 @@
 #include <keel/keel.h>
 #include "net_compat.h"
 #include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
+#include "atomic_flags.h"        /* flags shared by loop callbacks and the test thread */
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -233,7 +234,7 @@ static void handle_no_reader(KlHttpRequest *req, KlHttpResponse *res, void *ctx)
  * in kl_http_conn_on_readable's rc<0 / pr==KL_HTTP1_PARSE_ERROR paths must see
  * the SENDING state and honor it instead of overwriting with the
  * hardcoded 413 + CLOSED. */
-static volatile int eer_err_handler_called = 0;
+static int eer_err_handler_called = 0;   /* set on the loop, polled by the test: atomic */
 
 typedef struct {
     KlHttpBodyReader  base;
@@ -290,7 +291,7 @@ static void handle_early_exit_err(KlHttpRequest *req, KlHttpResponse *res, void 
     r->conn = kl_http_request_conn(req);
     r->res  = res;
     r->conn->state = KL_HTTP_CONN_READING_BODY;
-    eer_err_handler_called = 1;
+    T_STORE(eer_err_handler_called, 1);
 }
 
 /* ── Streaming-async early-invoke fixture (v2.2.0) ───────────────────
@@ -306,7 +307,7 @@ static void handle_early_exit_err(KlHttpRequest *req, KlHttpResponse *res, void 
  * The fixture reuses eer_err_factory (stateless) but tracks invocation
  * with its own flag so tests stay independent.
  */
-static volatile int eer_async_err_handler_called = 0;
+static int eer_async_err_handler_called = 0;   /* set on the loop, polled by the test: atomic */
 
 static void handle_early_exit_async_err(KlHttpRequest *req, KlHttpResponse *res,
                                           void *ctx) {
@@ -320,7 +321,7 @@ static void handle_early_exit_async_err(KlHttpRequest *req, KlHttpResponse *res,
      * consumer must. The test below asserts the parked handler catches the mid-stream cap and emits
      * the structured error response, which only happens if await_body kept the body feeding. */
     kl_http_request_await_body(req);
-    eer_async_err_handler_called = 1;
+    T_STORE(eer_async_err_handler_called, 1);
 }
 
 /* ── Streaming-async synchronous-completion fixture (v2.2.0) ─────────
@@ -388,7 +389,7 @@ static void handle_async_sync_reject(KlHttpRequest *req, KlHttpResponse *res,
  * to know when the handler has run (and therefore when it's safe to
  * send the second body chunk), instead of guessing with a fixed
  * usleep. Reset to 0 at the start of each test. */
-static volatile int eer_handler_called = 0;
+static int eer_handler_called = 0;   /* set on the loop, polled by the test: atomic */
 
 typedef struct {
     KlHttpBodyReader  base;
@@ -448,7 +449,7 @@ static void handle_early_exit(KlHttpRequest *req, KlHttpResponse *res, void *ctx
     kl_http_request_await_body(req);
     /* Signal the test thread that we've run; it polls this before
      * sending the second body chunk so the test isn't timing-fragile. */
-    eer_handler_called = 1;
+    T_STORE(eer_handler_called, 1);
 }
 
 static KlHttpServer test_server;
@@ -967,7 +968,7 @@ UTEST(integration, streaming_mid_stream_early_exit) {
     size_t resp_cap         = 512;
 
     /* Reset the handler-ran flag so the poll below has clean state. */
-    eer_handler_called = 0;
+    T_STORE(eer_handler_called, 0);
 
     char *hdr = kl_malloc(&alloc, hdr_cap);
     ASSERT_TRUE(hdr != NULL);
@@ -996,8 +997,8 @@ UTEST(integration, streaming_mid_stream_early_exit) {
      * polling pattern as wait_for_bind() above. Avoids fixed-sleep
      * flakiness on loaded CI. ~2-second cap covers slow runners; the
      * normal-case wait is much shorter (a few ms). */
-    for (int i = 0; i < 200 && !eer_handler_called; i++) kl_test_sleep_ms(10);
-    ASSERT_TRUE(eer_handler_called);
+    for (int i = 0; i < 200 && !T_LOAD(eer_handler_called); i++) kl_test_sleep_ms(10);
+    ASSERT_TRUE(T_LOAD(eer_handler_called));
 
     /* Write 2: chunk2. Arrives in READING_BODY state, on_data fires
      * with conn+res NOW set → response goes out, state = SENDING.
@@ -1043,7 +1044,7 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
     size_t hdr_cap          = 256;
     size_t resp_cap         = 512;
 
-    eer_err_handler_called = 0;
+    T_STORE(eer_err_handler_called, 0);
 
     char *hdr = kl_malloc(&alloc, hdr_cap);
     ASSERT_TRUE(hdr != NULL);
@@ -1067,8 +1068,8 @@ UTEST(integration, streaming_mid_stream_early_exit_on_error) {
     (void)kl_test_sockwrite(fd, hdr, (size_t)hdr_len);
     (void)kl_test_sockwrite(fd, chunk1, chunk1_len);
 
-    for (int i = 0; i < 200 && !eer_err_handler_called; i++) kl_test_sleep_ms(10);
-    ASSERT_TRUE(eer_err_handler_called);
+    for (int i = 0; i < 200 && !T_LOAD(eer_err_handler_called); i++) kl_test_sleep_ms(10);
+    ASSERT_TRUE(T_LOAD(eer_err_handler_called));
 
     /* Chunk 2 arrives in READING_BODY. on_data fires with conn+res
      * set, writes the 413 response, sets state = SENDING, returns -1.
@@ -1127,7 +1128,7 @@ UTEST(integration, streaming_async_single_read_leftover_cap) {
     size_t total_cap        = 1024;
     size_t resp_cap         = 512;
 
-    eer_async_err_handler_called = 0;
+    T_STORE(eer_async_err_handler_called, 0);
 
     char *packet = kl_malloc(&alloc, total_cap);
     ASSERT_TRUE(packet != NULL);
@@ -1159,7 +1160,7 @@ UTEST(integration, streaming_async_single_read_leftover_cap) {
     /* Handler must have run (proves the reorder fired) AND the
      * structured 413 response must have landed (proves the state-
      * honoring branch picked it up over the hardcoded one). */
-    ASSERT_TRUE(eer_async_err_handler_called);
+    ASSERT_TRUE(T_LOAD(eer_async_err_handler_called));
     ASSERT_TRUE(strstr(buf, "413") != NULL);
     ASSERT_TRUE(strstr(buf, "Content-Type: text/plain") != NULL);
     ASSERT_TRUE(strstr(buf, "cap exceeded") != NULL);

@@ -862,8 +862,8 @@ UTEST(stream_termination, a_stale_begin_between_requests_writes_nothing) {
  * gets both in one buffer: it answers the first and closes (pipelining is not supported). */
 UTEST(stream_termination, a_tls_request_already_in_the_engine_is_not_left_waiting) {
     static const char reqs[] = GET_HELLO GET_HELLO;
-    mock_tls_split_after = 0;
-    mock_tls_split_record = sizeof reqs - 1;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(sizeof reqs - 1));
     mock_tls_sock_serve_max = sizeof GET_HELLO - 1;   /* one request per read, the rest pending */
     int port = server_start(0, 1);
     ASSERT_GT(port, 0);
@@ -883,7 +883,7 @@ UTEST(stream_termination, a_tls_request_already_in_the_engine_is_not_left_waitin
         kl_test_closesock(fd);
     }
     server_stop();
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
     mock_tls_sock_serve_max = 0;
     printf("  %s: first %ld, second %ld, closed %d, reset %d\n", completion ? "completion" : "readiness",
            p.first_len, p.second_len, p.closed, p.reset);

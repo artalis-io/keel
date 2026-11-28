@@ -18,6 +18,7 @@
 #include <keel/websocket_server.h>
 #include <keel/websocket_client.h>
 #include "net_compat.h"
+#include "atomic_flags.h"    /* callback flags polled by the test thread */
 #include "platform_thread.h"
 #include "mock_tls.h"
 #if !defined(_WIN32)
@@ -306,8 +307,8 @@ UTEST(ws_split_frames, tls_record_split_across_reads_is_not_eof) {
     static unsigned char frame[64];
     static const unsigned char msg[] = "hello over a split record";
     size_t fl = build_masked(frame, 0x1, msg, sizeof msg - 1);
-    mock_tls_split_after = (size_t)rn;         /* the upgrade request passes whole */
-    mock_tls_split_record = fl;                /* the frame's record arrives in two parts */
+    kl_atomic_store_int(&mock_tls_split_after, (int)((size_t)rn));         /* the upgrade request passes whole */
+    kl_atomic_store_int(&mock_tls_split_record, (int)(fl));                /* the frame's record arrives in two parts */
 
     if (ok) ok = send_all(fd, req, (size_t)rn) == 0;
     static char resp[1024]; size_t rl = 0;
@@ -325,8 +326,8 @@ UTEST(ws_split_frames, tls_record_split_across_reads_is_not_eof) {
     int opcode = -1; static unsigned char echo[64]; size_t got = 0;
     int echoed = ok && read_frame(fd, &opcode, echo, sizeof echo, &got) == 0;
 
-    mock_tls_split_record = 0;
-    mock_tls_split_after = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
     if (kl_handle_valid(fd)) kl_test_closesock(fd);
     srv_stop(&s);
     ASSERT_TRUE(ok);
@@ -353,8 +354,8 @@ UTEST(ws_split_frames, tls_record_larger_than_the_read_buffer_is_drained) {
     static unsigned char msg[N], frame[N + 16], echo[N];
     for (size_t i = 0; i < N; i++) msg[i] = pat(i);
     size_t fl = build_masked(frame, 0x2, msg, N);
-    mock_tls_split_after = (size_t)rn;
-    mock_tls_split_record = fl;                /* one record carrying the whole frame */
+    kl_atomic_store_int(&mock_tls_split_after, (int)((size_t)rn));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(fl));                /* one record carrying the whole frame */
 
     if (ok) ok = send_all(fd, req, (size_t)rn) == 0;
     static char resp[1024]; size_t rl = 0;
@@ -372,8 +373,8 @@ UTEST(ws_split_frames, tls_record_larger_than_the_read_buffer_is_drained) {
     int opcode = -1; size_t got = 0;
     int echoed = ok && read_frame(fd, &opcode, echo, sizeof echo, &got) == 0;
 
-    mock_tls_split_record = 0;
-    mock_tls_split_after = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
     if (kl_handle_valid(fd)) kl_test_closesock(fd);
     srv_stop(&s);
     ASSERT_TRUE(ok);
@@ -578,20 +579,20 @@ UTEST(ws_server_frag, empty_message_inside_a_fragmented_one_fails_with_1002) {
  * the connection stayed open. A later send, once the peer has read and the socket has room again,
  * then started a frame header in the middle of the old payload: the stream was desynced. Once a
  * frame was cut short, no further frame may be sent. */
-static int g_sends_done, g_next_done;
+static int g_sends_done, g_next_done;   /* set on the loop, polled by the test: atomic */
 static void big_on_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
     (void)data; (void)len; (void)is_binary; (void)ud;
-    if (!g_sends_done) {                            /* "go": fill the socket until a frame is cut */
+    if (!T_LOAD(g_sends_done)) {                            /* "go": fill the socket until a frame is cut */
         static char big[1024 * 1024];
         memset(big, 'B', sizeof big);
         for (int i = 0; i < 16; i++)
             if (kl_ws_server_send_binary(ws, big, sizeof big) < 0) break;
-        g_sends_done = 1;
+        T_STORE(g_sends_done, 1);
         return;
     }
     for (int i = 0; i < 3; i++)                     /* "more", after the peer has read: none may */
         (void)kl_ws_server_send_text(ws, "next", 4);    /* follow the cut frame */
-    g_next_done = 1;
+    T_STORE(g_next_done, 1);
 }
 
 /* Parse what the peer received: every frame header must be a valid unmasked server frame (FIN,
@@ -654,6 +655,7 @@ UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
     kl_ws_server_config_init(&s.ws_cfg);
     s.ws_cfg.callbacks.on_message = big_on_message;
     ASSERT_EQ(kl_http_server_ws_upgrade(&s.srv, "/ws", &s.ws_cfg), 0);
+    g_sends_done = 0; g_next_done = 0;              /* before the server thread */
     ASSERT_EQ(kl_plat_thread_create(&s.t, server_thread_fn, &s.srv), 0);
     for (int i = 0; i < 300 && kl_http_server_bound_port(&s.srv) == 0; i++) kl_test_sleep_ms(10);
     s.port = kl_http_server_bound_port(&s.srv);
@@ -661,7 +663,6 @@ UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
 #if !defined(_WIN32)
     signal(SIGPIPE, SIG_IGN);                       /* the fixed server may close before "more" */
 #endif
-    g_sends_done = 0; g_next_done = 0;
     static unsigned char rx[20 * 1024 * 1024];
     size_t got = 0;
     KlSocketHandle fd = ws_open_raw(s.port);
@@ -669,7 +670,7 @@ UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
         unsigned char f[32];
         size_t fl = build_masked(f, 0x1, (const unsigned char *)"go", 2);
         (void)send_all(fd, f, fl);                  /* then read nothing while the server sends */
-        for (int i = 0; i < 100 && !g_sends_done; i++) kl_test_sleep_ms(20);
+        for (int i = 0; i < 100 && !T_LOAD(g_sends_done); i++) kl_test_sleep_ms(20);
         for (int round = 0; round < 2; round++) {
             for (;;) {                              /* read what has been sent, to a lull */
                 if (kl_test_poll1(fd, 0, round == 0 ? 300 : 1000) <= 0) break;
@@ -681,13 +682,13 @@ UTEST(ws_server_send, a_cut_short_frame_is_never_followed_by_another) {
             if (round == 0) {                       /* the socket has room again: ask for more */
                 fl = build_masked(f, 0x1, (const unsigned char *)"more", 4);
                 (void)send_all(fd, f, fl);
-                for (int i = 0; i < 100 && !g_next_done; i++) kl_test_sleep_ms(20);
+                for (int i = 0; i < 100 && !T_LOAD(g_next_done); i++) kl_test_sleep_ms(20);
             }
         }
         kl_test_closesock(fd);
     }
     srv_stop(&s);
-    ASSERT_TRUE(g_sends_done);
+    ASSERT_TRUE(T_LOAD(g_sends_done));
     ASSERT_TRUE(got > 0);
     ASSERT_TRUE(stream_well_formed(rx, got));       /* was: a frame header inside a payload */
 }

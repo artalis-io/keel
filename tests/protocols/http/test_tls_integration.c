@@ -269,10 +269,10 @@ UTEST(tls_integration, record_split_in_headers_waits_for_the_rest) {
 
     static char buf[2048];
     const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    mock_tls_split_after = 0;
-    mock_tls_split_record = strlen(req);
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(strlen(req)));
     split_round_trip(kl_http_server_bound_port(&split_srv), req, 20, buf, sizeof buf);
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
 
     kl_http_server_stop(&split_srv);
     kl_plat_thread_join(&tid);
@@ -295,8 +295,8 @@ UTEST(tls_integration, record_split_in_body_waits_for_the_rest) {
                        "Connection: close\r\n\r\n";
     static char req[256];
     snprintf(req, sizeof req, "%s0123456789", hdrs);
-    mock_tls_split_after = strlen(hdrs);       /* the headers arrive whole; the body record splits */
-    mock_tls_split_record = 10;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(strlen(hdrs)));       /* the headers arrive whole; the body record splits */
+    kl_atomic_store_int(&mock_tls_split_record, (int)(10));
     /* headers alone first, then half the body, then the rest */
     int fd = connect_to(kl_http_server_bound_port(&split_srv));
     buf[0] = '\0';
@@ -309,8 +309,8 @@ UTEST(tls_integration, record_split_in_body_waits_for_the_rest) {
         read_response(fd, buf, sizeof buf, 3000);
         kl_test_closesock(fd);
     }
-    mock_tls_split_record = 0;
-    mock_tls_split_after = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
 
     kl_http_server_stop(&split_srv);
     kl_plat_thread_join(&tid);
@@ -590,15 +590,15 @@ UTEST(tls_integration, a_body_held_in_the_engine_after_the_header_read_is_read_o
     size_t len = 0;
     tls_big_request(rq, sizeof rq, "/echo", 12000, &len);
     buf[0] = '\0';
-    mock_tls_split_after = 0;
-    mock_tls_split_record = len;                           /* one record, more than the 8 KiB buffer */
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(len));                           /* one record, more than the 8 KiB buffer */
     int fd = connect_to(kl_http_server_bound_port(&tq_hold_body_srv));
     if (fd >= 0) {
         (void)kl_test_sockwrite(fd, rq, len);
         read_one_response(fd, buf, sizeof buf, 2500);
         kl_test_closesock(fd);
     }
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
     kl_http_server_stop(&tq_hold_body_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&tq_hold_body_srv);
@@ -680,15 +680,15 @@ UTEST(tls_integration, a_body_held_in_the_engine_is_read_on_after_an_async_resum
     size_t len = 0;
     tls_big_request(rq, sizeof rq, "/aw", 12000, &len);
     buf[0] = '\0';
-    mock_tls_split_after = 0;
-    mock_tls_split_record = len;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(len));
     int fd = connect_to(kl_http_server_bound_port(&tq_hold_async_srv));
     if (fd >= 0) {
         (void)kl_test_sockwrite(fd, rq, len);
         read_response(fd, buf, sizeof buf, 2500);
         kl_test_closesock(fd);
     }
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
     kl_http_server_stop(&tq_hold_async_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&tq_hold_async_srv);
@@ -761,15 +761,15 @@ UTEST(tls_integration, a_body_paused_by_on_data_still_takes_the_record_held_in_t
     size_t len = 0;
     tls_big_request(rq, sizeof rq, "/p", 12000, &len);
     buf[0] = '\0';
-    mock_tls_split_after = 0;
-    mock_tls_split_record = len;                           /* one record, more than the 8 KiB buffer */
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(len));                           /* one record, more than the 8 KiB buffer */
     int fd = connect_to(kl_http_server_bound_port(&tq_pause_srv));
     if (fd >= 0) {
         (void)kl_test_sockwrite(fd, rq, len);
         read_response(fd, buf, sizeof buf, 3000);
         kl_test_closesock(fd);
     }
-    mock_tls_split_record = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
     kl_http_server_stop(&tq_pause_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&tq_pause_srv);
@@ -925,7 +925,7 @@ UTEST(tls_integration, tls_100_continue_survives_a_refused_write) {
     interim[0] = '\0';
     int fd = connect_to(kl_http_server_bound_port(&cw_srv));
     if (fd >= 0) {
-        mock_tls_write_want = 1;                           /* the server's next write is refused once */
+        kl_atomic_store_int(&mock_tls_write_want, (int)(1));                           /* the server's next write is refused once */
         const char *rq = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
                          "Expect: 100-continue\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -938,7 +938,7 @@ UTEST(tls_integration, tls_100_continue_survives_a_refused_write) {
         (void)read_response(fd, rest, sizeof rest, 1000);
         kl_test_closesock(fd);
     }
-    mock_tls_write_want = 0;
+    kl_atomic_store_int(&mock_tls_write_want, (int)(0));
     kl_http_server_stop(&cw_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&cw_srv);
@@ -993,7 +993,7 @@ UTEST(tls_integration, a_failed_100_continue_tells_the_body_reader) {
     interim[0] = '\0';
     int fd = connect_to(kl_http_server_bound_port(&ce_srv));
     if (fd >= 0) {
-        mock_tls_write_want = 100000;                      /* every write refused: the server gives up */
+        kl_atomic_store_int(&mock_tls_write_want, (int)(100000));                      /* every write refused: the server gives up */
         const char *rq = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n"
                          "Expect: 100-continue\r\nConnection: close\r\n\r\n";
         (void)kl_test_sockwrite(fd, rq, strlen(rq));
@@ -1001,13 +1001,13 @@ UTEST(tls_integration, a_failed_100_continue_tells_the_body_reader) {
         if (kl_test_poll1(fd, 0, 1000) > 0)
             n = kl_test_sockread(fd, interim, sizeof interim - 1);
         interim[n > 0 ? n : 0] = '\0';
-        mock_tls_write_want = 0;
+        kl_atomic_store_int(&mock_tls_write_want, (int)(0));
         (void)kl_test_sockwrite(fd, "hello", 5);
         char rest[512];
         (void)read_response(fd, rest, sizeof rest, 1000);
         kl_test_closesock(fd);
     }
-    mock_tls_write_want = 0;
+    kl_atomic_store_int(&mock_tls_write_want, (int)(0));
     kl_http_server_stop(&ce_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&ce_srv);
@@ -1024,8 +1024,8 @@ UTEST(tls_integration, a_failed_100_continue_tells_the_body_reader) {
 static KlHttpServer hdl_srv;
 
 static void hdl_reset_mock(void) {
-    mock_tls_split_record = 0;
-    mock_tls_split_after = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
     mock_tls_comp_record = 0;
     mock_tls_comp_record_after = 0;
     mock_tls_handshake_bytes = 0;
@@ -1070,8 +1070,8 @@ UTEST(tls_integration, header_deadline_covers_a_dripped_record) {
     ASSERT_TRUE(port > 0);
     const char *req = "GET /hello HTTP/1.1\r\nHost: localhost\r\n\r\n";
     /* The first request decrypts normally; after it, a record never completes. */
-    mock_tls_split_after = strlen(req);
-    mock_tls_split_record = 100000;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(strlen(req)));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(100000));
     mock_tls_comp_record_after = strlen(req);
     mock_tls_comp_record = 100000;
     int fd = connect_to(port);

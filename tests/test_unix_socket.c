@@ -1,6 +1,7 @@
 #include "utest.h"
 #include <keel/keel.h>
 #include "mock_tls.h"   /* shared completion-capable identity TLS mock */
+#include "server_stats_probe.h"   /* loop-owned state (the listen fd), read on the loop */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1396,6 +1397,12 @@ UTEST(unix_socket, unknown_group_rejected) {
     unlink(path);
 }
 
+static int g_listen_fd;
+static void sample_listen_fd(KlHttpServer *s, void *ud) {
+    (void)ud;
+    kl_atomic_store_int(&g_listen_fd, (int)s->listen_fd);
+}
+
 UTEST(unix_socket, listen_fd_is_cloexec) {
     char path[108];
     test_sock_path(path, sizeof(path), "cloexec");
@@ -1408,6 +1415,10 @@ UTEST(unix_socket, listen_fd_is_cloexec) {
         .max_connections = 4,
     };
     ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    KlTestStatsProbe lp;                       /* the listen fd is the loop's: sample it there */
+    ASSERT_EQ(0, kl_test_stats_probe_init(&lp, &srv));
+    lp.on_loop = sample_listen_fd;
+    kl_atomic_store_int(&g_listen_fd, -1);
 
     pthread_t tid;
     ASSERT_EQ(0, pthread_create(&tid, NULL, unix_server_thread, &srv));
@@ -1415,12 +1426,15 @@ UTEST(unix_socket, listen_fd_is_cloexec) {
     ASSERT_TRUE(probe >= 0);
     close(probe);
 
-    int fdflags = fcntl(srv.listen_fd, F_GETFD);
+    KlHttpServerStats st;
+    ASSERT_EQ(0, kl_test_stats_probe_get(&lp, &st));
+    int fdflags = fcntl(kl_atomic_load_int(&g_listen_fd), F_GETFD);
     ASSERT_TRUE(fdflags >= 0);
     ASSERT_TRUE((fdflags & FD_CLOEXEC) != 0);
 
     kl_http_server_stop(&srv);
     pthread_join(tid, NULL);
+    kl_test_stats_probe_free(&lp);
     kl_http_server_free(&srv);
 }
 

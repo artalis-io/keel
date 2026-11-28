@@ -21,6 +21,8 @@
 #include "net_compat.h"
 #include "platform_thread.h"
 #include "kl_atomic.h"
+#include "server_stats_probe.h"   /* loop-owned state, sampled on the loop for the test thread */
+#include "atomic_flags.h"
 #include "mock_tls.h"         /* identity TLS (no crypto), readiness and completion */
 #include "http_conn_internal.h"   /* KlHttpConn.hup_state: proves detection happened (or not) */
 #include <keel/thread_pool.h>
@@ -125,6 +127,42 @@ static int builtin_is_completion(void) {
     return (caps & KL_EVENT_CAP_COMPLETION) != 0;
 }
 
+/* Loop-owned state the tests check while the server runs (a conn's hang-up state, the server's
+ * sweep timer): sampled on the loop thread by the stats probe's hook, published through atomics. */
+static KlTestStatsProbe g_probe;
+static int g_probe_live, g_probe_park, g_seen_hup_state, g_seen_sweep_armed;
+static void hup_sample(KlHttpServer *s, void *ud) {
+    (void)ud;
+    int i = T_LOAD(g_probe_park);         /* -1: no park asked for (its slots may be stale) */
+    KlHttpConn *c = i >= 0 ? parks[i].op.conn : NULL;
+    T_STORE(g_seen_hup_state, c ? c->hup_state : -1);
+    T_STORE(g_seen_sweep_armed, s->hup_sweep_armed);
+}
+static void probe_start(void) {           /* before the server thread starts */
+    if (kl_test_stats_probe_init(&g_probe, &srv) != 0) abort();
+    g_probe.on_loop = hup_sample;
+    T_STORE(g_probe_park, -1);
+    g_probe_live = 1;
+}
+static void probe_stop(void) {            /* after the server thread is joined */
+    if (g_probe_live) kl_test_stats_probe_free(&g_probe);
+    g_probe_live = 0;
+}
+static int loop_sample(void) {
+    KlHttpServerStats st;
+    return kl_test_stats_probe_get(&g_probe, &st);
+}
+
+/* The suspended connection's hang-up state (read while it is still suspended). */
+static int hup_state_of(int i) {
+    T_STORE(g_probe_park, i);
+    return loop_sample() == 0 ? T_LOAD(g_seen_hup_state) : -1;
+}
+static int sweep_armed(void) {
+    T_STORE(g_probe_park, -1);
+    return loop_sample() == 0 ? T_LOAD(g_seen_sweep_armed) : -1;
+}
+
 static void start_ex(KlHttpSuspendHangup policy, int tls, const KlEventProvider *ep) {
     memset(parks, 0, sizeof parks);
     kl_atomic_store_int(&n_parked, 0);
@@ -144,6 +182,7 @@ static void start_ex(KlHttpSuspendHangup policy, int tls, const KlEventProvider 
     if (kl_http_server_init(&srv, &cfg) != 0) abort();
     kl_http_server_route(&srv, "GET", "/park", handle_park, NULL, NULL);
     kl_http_server_route(&srv, "GET", "/fast", handle_fast, NULL, NULL);
+    probe_start();
     kl_plat_thread_create(&srv_tid, srv_thread, NULL);
     for (int i = 0; i < 300 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
 }
@@ -151,8 +190,6 @@ static void start_ex(KlHttpSuspendHangup policy, int tls, const KlEventProvider 
 static void start_tls(KlHttpSuspendHangup policy, int tls) { start_ex(policy, tls, NULL); }
 static void start(KlHttpSuspendHangup policy) { start_ex(policy, 0, NULL); }
 
-/* The suspended connection's hang-up state (read while it is still suspended). */
-static int hup_state_of(int i) { return kl_atomic_load_int(&parks[i].op.conn->hup_state); }
 static int wait_hup_state(int i, int want, int ms) {
     for (int k = 0; k < ms / 10 && hup_state_of(i) != want; k++) kl_test_sleep_ms(10);
     return hup_state_of(i) == want;
@@ -161,6 +198,7 @@ static int wait_hup_state(int i, int want, int ms) {
 static void stop(void) {
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&srv_tid);
+    probe_stop();
     kl_http_server_free(&srv);
 }
 
@@ -364,19 +402,23 @@ static KlSocketProvider cnt_prov;
 static kl_ssize_t (*orig_peek)(void *, KlSocketHandle, void *, size_t);
 static KlSocketHandle cnt_fd[SWEEP_MAX + 32];
 static int cnt_n[SWEEP_MAX + 32];
-static int cnt_slots;                                   /* server thread only */
+static int cnt_slots;                                   /* written by the server thread: atomic */
 static int cnt_total;
 static uint64_t tick_first, tick_last, tick_span_max;   /* server thread only */
+static int tick_span_ms;                                /* tick_span_max, published (atomic) */
 
 static kl_ssize_t cnt_peek(void *ctx, KlSocketHandle fd, void *buf, size_t len) {
     uint64_t now = kl_monotonic_ms();
     if (now - tick_last > 500) tick_first = now;       /* a new sweep tick began */
     tick_last = now;
-    if (tick_last - tick_first > tick_span_max) tick_span_max = tick_last - tick_first;
-    int i = 0;
-    while (i < cnt_slots && cnt_fd[i] != fd) i++;
-    if (i == cnt_slots && cnt_slots < SWEEP_MAX + 32) { cnt_fd[i] = fd; cnt_slots++; }
-    if (i < cnt_slots) kl_atomic_store_int(&cnt_n[i], kl_atomic_load_int(&cnt_n[i]) + 1);
+    if (tick_last - tick_first > tick_span_max) {
+        tick_span_max = tick_last - tick_first;
+        T_STORE(tick_span_ms, (int)tick_span_max);
+    }
+    int i = 0, slots = T_LOAD(cnt_slots);
+    while (i < slots && cnt_fd[i] != fd) i++;
+    if (i == slots && slots < SWEEP_MAX + 32) { cnt_fd[i] = fd; T_STORE(cnt_slots, ++slots); }
+    if (i < slots) kl_atomic_store_int(&cnt_n[i], kl_atomic_load_int(&cnt_n[i]) + 1);
     kl_atomic_store_int(&cnt_total, kl_atomic_load_int(&cnt_total) + 1);
     return orig_peek(ctx, fd, buf, len);
 }
@@ -421,9 +463,10 @@ UTEST(suspend_hangup, sweep_bounded_on_many_suspended_connections) {
     cnt_ops.recv_peek = cnt_peek;
     cnt_prov = *base;
     cnt_prov.ops = &cnt_ops;
-    cnt_slots = 0; kl_atomic_store_int(&cnt_total, 0);
+    T_STORE(cnt_slots, 0); kl_atomic_store_int(&cnt_total, 0);
     memset(cnt_n, 0, sizeof cnt_n);
     tick_first = tick_last = tick_span_max = 0;
+    T_STORE(tick_span_ms, 0);
 
     kl_atomic_store_int(&n_parked, 0);
     kl_atomic_store_int(&n_cancel, 0);
@@ -435,6 +478,7 @@ UTEST(suspend_hangup, sweep_bounded_on_many_suspended_connections) {
     cfg.sockets = &cnt_prov;
     ASSERT_EQ(kl_http_server_init(&srv, &cfg), 0);
     kl_http_server_route(&srv, "GET", "/quiet", handle_quiet, NULL, NULL);
+    probe_start();
     kl_plat_thread_create(&srv_tid, srv_thread, NULL);
     for (int i = 0; i < 300 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
 
@@ -448,7 +492,7 @@ UTEST(suspend_hangup, sweep_bounded_on_many_suspended_connections) {
     ASSERT_TRUE(wait_for(&n_parked, N, 10000));
     kl_test_sleep_ms(1200);              /* every connection is in the sweep by now */
 
-    int before[SWEEP_MAX + 32], slots = cnt_slots;
+    int before[SWEEP_MAX + 32], slots = T_LOAD(cnt_slots);
     for (int i = 0; i < slots; i++) before[i] = kl_atomic_load_int(&cnt_n[i]);
     kl_test_sleep_ms(2500);
     int lo = 1 << 30, hi = 0, probed = 0;
@@ -460,7 +504,7 @@ UTEST(suspend_hangup, sweep_bounded_on_many_suspended_connections) {
         if (d > hi) hi = d;
     }
     printf("        sweep: %d suspended, %d probed in 2.5 s, %d..%d probes each, longest tick %llu ms\n",
-           N, probed, lo, hi, (unsigned long long)tick_span_max);
+           N, probed, lo, hi, (unsigned long long)T_LOAD(tick_span_ms));
     EXPECT_EQ(probed, N);                /* each suspended connection is probed */
     EXPECT_TRUE(hi - lo <= 1);           /* once per tick: never more for one than another */
     EXPECT_TRUE(lo >= 2 && hi <= 3);     /* 1 s ticks, not per loop iteration */
@@ -471,7 +515,7 @@ UTEST(suspend_hangup, sweep_bounded_on_many_suspended_connections) {
     int total = kl_atomic_load_int(&cnt_total);
     kl_test_sleep_ms(2500);
     EXPECT_EQ(kl_atomic_load_int(&cnt_total), total);   /* no probe once no op needs one */
-    EXPECT_EQ(kl_atomic_load_int(&srv.hup_sweep_armed), 0);
+    EXPECT_EQ(sweep_armed(), 0);
     stop();
 }
 
@@ -537,7 +581,7 @@ typedef struct { KlAsyncOp op; int op_ended, pool_released, idx; } TdCtx;
 static int td_gate, td_started, td_frees, td_freed[4];
 static KlThreadPool *td_pool;
 
-static void td_free(TdCtx *w) { td_freed[w->idx]++; td_frees++; free(w); }
+static void td_free(TdCtx *w) { td_freed[w->idx]++; T_INC(td_frees); free(w); }
 static void td_release_op(TdCtx *w)   { w->op_ended = 1;      if (w->pool_released) td_free(w); }
 static void td_release_pool(TdCtx *w) { w->pool_released = 1; if (w->op_ended) td_free(w); }
 
@@ -584,7 +628,7 @@ static void handle_td(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
 UTEST(suspend_hangup, teardown_with_queued_pool_work_frees_each_context_once) {
     kl_atomic_store_int(&td_gate, 0);
     kl_atomic_store_int(&td_started, 0);
-    td_frees = 0;
+    T_STORE(td_frees, 0);
     memset(td_freed, 0, sizeof td_freed);
     kl_atomic_store_int(&n_parked, 0);
     kl_atomic_store_int(&n_cancel, 0);
@@ -596,6 +640,7 @@ UTEST(suspend_hangup, teardown_with_queued_pool_work_frees_each_context_once) {
     td_pool = kl_thread_pool_create(&srv.ev, &pc);
     ASSERT_TRUE(td_pool != NULL);
     kl_http_server_route(&srv, "GET", "/td", handle_td, NULL, NULL);
+    probe_start();
     kl_plat_thread_create(&srv_tid, srv_thread, NULL);
     for (int i = 0; i < 300 && kl_http_server_bound_port(&srv) == 0; i++) kl_test_sleep_ms(10);
 
@@ -610,10 +655,11 @@ UTEST(suspend_hangup, teardown_with_queued_pool_work_frees_each_context_once) {
     ASSERT_TRUE(wait_for(&td_started, 1, 2000));   /* job 0 holds the only worker; 1 and 2 are queued */
     kl_test_closesock(fds[2]);                        /* hang-up while its job is queued */
     EXPECT_TRUE(wait_for(&n_cancel, 1, DETECT_MS));
-    EXPECT_EQ(td_frees, 0);                           /* the pool still owns it */
+    EXPECT_EQ(T_LOAD(td_frees), 0);                   /* the pool still owns it */
 
     kl_http_server_stop(&srv);
     kl_plat_thread_join(&srv_tid);
+    probe_stop();
     KlPlatThread opener;                              /* job 0 finishes only after shutdown: 1, 2 never run */
     ASSERT_EQ(kl_plat_thread_create(&opener, td_gate_opener, td_pool), 0);
     kl_thread_pool_free(td_pool);                     /* done_fn(0), cancel_fn(1), cancel_fn(2) */
@@ -623,7 +669,7 @@ UTEST(suspend_hangup, teardown_with_queued_pool_work_frees_each_context_once) {
     EXPECT_EQ(td_freed[1], 0);                        /* still suspended: its op owns it */
     kl_http_server_free(&srv);                        /* cancels op 1: on_cancel frees it */
     EXPECT_EQ(td_freed[1], 1);
-    EXPECT_EQ(td_frees, 3);
+    EXPECT_EQ(T_LOAD(td_frees), 3);
     EXPECT_EQ(ld(&n_cancel), 2);
     kl_test_closesock(fds[0]);
     kl_test_closesock(fds[1]);

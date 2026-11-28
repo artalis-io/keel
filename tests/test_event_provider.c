@@ -142,15 +142,15 @@ UTEST(event_provider, server_runs_on_injected_backend) {
         got += (size_t)n; buf[got] = 0;
         if (strstr(buf, "\r\n\r\n")) break;
     }
-    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
-    ASSERT_TRUE(strstr(buf, "\"backend\":\"custom\"") != NULL);
-    ASSERT_EQ(1, g_handler_called);
-    ASSERT_TRUE(ep_wait_calls > 0);   /* the injected backend actually drove the loop */
-
     kl_test_closesock(fd);
     kl_http_server_stop(&g_srv);
     kl_plat_thread_join(&tid);
     kl_http_server_free(&g_srv);
+    /* The loop thread's counters, read after the join. */
+    ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
+    ASSERT_TRUE(strstr(buf, "\"backend\":\"custom\"") != NULL);
+    ASSERT_EQ(1, g_handler_called);
+    ASSERT_TRUE(ep_wait_calls > 0);   /* the injected backend actually drove the loop */
 }
 
 UTEST_MAIN();

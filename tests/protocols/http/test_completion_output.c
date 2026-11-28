@@ -17,6 +17,7 @@
 #include <keel/tls.h>
 #include "net_compat.h"
 #include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
+#include "atomic_flags.h"        /* flags shared by loop callbacks and the test thread */
 #include "mock_tls.h"
 #include "event_caps.h"
 #include "http_internal.h"              /* kl_comp_http2_queue_full / kl_comp_ws_queue_full */
@@ -523,11 +524,12 @@ static int g_ws_sent_ok;
 static void ws_open_flood(KlWsServerConn *ws, void *ud) {
     (void)ud;
     memset(g_big_chunk, 'B', sizeof g_big_chunk);
-    g_ws_sent_ok = 0;
+    int sent = 0;
     for (int i = 0; i < BIG_CHUNKS; i++) {
         if (kl_ws_server_send_binary(ws, g_big_chunk, sizeof g_big_chunk) < 0) break;
-        g_ws_sent_ok++;
+        sent++;
     }
+    T_STORE(g_ws_sent_ok, sent);
 }
 
 static KlHttpServer wsb_srv;
@@ -539,10 +541,10 @@ UTEST(completion_output, a_websocket_backlog_to_a_stalled_reader_is_bounded) {
     kl_ws_server_config_init(&wcfg);
     wcfg.callbacks.on_open = ws_open_flood;
     ASSERT_EQ(0, kl_http_server_ws_upgrade(&wsb_srv, "/ws", &wcfg));
+    g_ws_sent_ok = -1;
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &wsb_srv);
     wait_for_bind(&wsb_srv);
-    g_ws_sent_ok = -1;
     int a = connect_rcvbuf(kl_http_server_bound_port(&wsb_srv), 4096);
     if (a >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -550,9 +552,9 @@ UTEST(completion_output, a_websocket_backlog_to_a_stalled_reader_is_bounded) {
                          "Sec-WebSocket-Version: 13\r\n\r\n";
         (void)kl_test_sockwrite(a, rq, strlen(rq));
     }
-    for (int i = 0; i < 300 && g_ws_sent_ok < 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 300 && T_LOAD(g_ws_sent_ok) < 0; i++) kl_test_sleep_ms(10);
     kl_test_sleep_ms(200);
-    int sent_ok = g_ws_sent_ok;
+    int sent_ok = T_LOAD(g_ws_sent_ok);
     if (a >= 0) kl_test_closesock(a);
     kl_http_server_stop(&wsb_srv);
     kl_plat_thread_join(&tid);
@@ -1134,10 +1136,10 @@ UTEST(completion_output, a_tls_websocket_backlog_to_a_stalled_reader_is_bounded)
     kl_ws_server_config_init(&wcfg);
     wcfg.callbacks.on_open = ws_open_flood;
     ASSERT_EQ(0, kl_http_server_ws_upgrade(&twsb_srv, "/ws", &wcfg));
+    g_ws_sent_ok = -1;
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &twsb_srv);
     wait_for_bind(&twsb_srv);
-    g_ws_sent_ok = -1;
     int a = connect_rcvbuf(kl_http_server_bound_port(&twsb_srv), 4096);
     if (a >= 0) {
         const char *rq = "GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -1145,9 +1147,9 @@ UTEST(completion_output, a_tls_websocket_backlog_to_a_stalled_reader_is_bounded)
                          "Sec-WebSocket-Version: 13\r\n\r\n";
         (void)kl_test_sockwrite(a, rq, strlen(rq));
     }
-    for (int i = 0; i < 300 && g_ws_sent_ok < 0; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 300 && T_LOAD(g_ws_sent_ok) < 0; i++) kl_test_sleep_ms(10);
     kl_test_sleep_ms(200);
-    int sent_ok = g_ws_sent_ok;
+    int sent_ok = T_LOAD(g_ws_sent_ok);
     if (a >= 0) kl_test_closesock(a);
     kl_http_server_stop(&twsb_srv);
     kl_plat_thread_join(&tid);
@@ -1355,8 +1357,9 @@ static void xw_open(KlWsServerConn *ws, void *ud) {
     (void)ud;
     (void)kl_ws_server_enable_drain(ws, 0);                /* unlimited: the whole backlog is kept */
     shrink_sndbuf(ws->conn);
-    if (g_xw_opened < 2) g_xw_conns[g_xw_opened] = ws;
-    g_xw_opened++;
+    int n = T_LOAD(g_xw_opened);
+    if (n < 2) g_xw_conns[n] = ws;
+    T_STORE(g_xw_opened, n + 1);
 }
 
 static void xw_message(KlWsServerConn *ws, const char *data, size_t len, int is_binary, void *ud) {
@@ -1416,9 +1419,9 @@ UTEST(completion_output, a_websocket_backlog_sent_from_another_connection_goes_o
 
     size_t want = (size_t)XW_FRAMES * (XW_FRAME + 4), got = 0;
     int b = ws_connect_upgraded(port, 4096);               /* the subscriber: reads, never sends */
-    for (int i = 0; i < 200 && g_xw_opened < 1; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && T_LOAD(g_xw_opened) < 1; i++) kl_test_sleep_ms(10);
     int a = ws_connect_upgraded(port, 0);                  /* the publisher */
-    for (int i = 0; i < 200 && g_xw_opened < 2; i++) kl_test_sleep_ms(10);
+    for (int i = 0; i < 200 && T_LOAD(g_xw_opened) < 2; i++) kl_test_sleep_ms(10);
     if (a >= 0 && b >= 0) {
         static const uint8_t go[] = { 0x81, 0x82, 1, 2, 3, 4, 'g' ^ 1, 'o' ^ 2 };   /* masked "go" */
         (void)kl_test_sockwrite(a, (const char *)go, sizeof go);
@@ -1531,10 +1534,10 @@ UTEST(completion_output, a_stream_written_while_suspended_keeps_moving) {
         }
         kl_test_closesock(fd);
     }
-    uint64_t resumed_ms = g_sf.resumed_ms;
-    int pushed = g_sf.next, failed = g_sf.failed;
     kl_http_server_stop(&sf_srv);
     kl_plat_thread_join(&tid);
+    uint64_t resumed_ms = g_sf.resumed_ms;                 /* read after the join */
+    int pushed = g_sf.next, failed = g_sf.failed;
     kl_http_server_free(&sf_srv);
     printf("  suspended feed: %zu bytes read, %d of %d chunks pushed, failed %d\n",
            have, pushed, SF_CHUNKS, failed);
@@ -1557,9 +1560,10 @@ typedef struct {
     KlHttpResponseWriteFn w;
     void *wc;
     size_t sent;
-    int paused, drains, failed, cancelled, ended;
+    int paused, drains, failed, ended;
 } PaceStream;
 static PaceStream g_pace;
+static int g_pace_cancelled;   /* polled by the test thread: atomic (atomic_flags.h) */
 static KlHttpServer pace_srv;
 
 static void pace_pump(void *ud);
@@ -1572,10 +1576,10 @@ static void pace_on_drain(void *ud) {
     }
 }
 static void pace_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
-static void pace_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_pace.cancelled++; }
+static void pace_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; T_INC(g_pace_cancelled); }
 static void pace_pump(void *ud) {
     (void)ud;
-    if (g_pace.failed || g_pace.cancelled || g_pace.ended) return;
+    if (g_pace.failed || T_LOAD(g_pace_cancelled) || g_pace.ended) return;
     static char chunk[PACE_CHUNK];
     memset(chunk, 'p', sizeof chunk);
     while (g_pace.sent < PACE_TOTAL) {
@@ -1594,6 +1598,7 @@ static void pace_pump(void *ud) {
 static void handle_paced(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset(&g_pace, 0, sizeof g_pace);
+    T_STORE(g_pace_cancelled, 0);
     g_pace.res = res;
     KlHttpConn *c = kl_http_request_conn(req);
     shrink_sndbuf(c);
@@ -1634,9 +1639,10 @@ UTEST(completion_output, a_suspended_stream_paced_on_on_drain_completes) {
         }
         kl_test_closesock(fd);
     }
-    int drains = g_pace.drains, cancelled = g_pace.cancelled, failed = g_pace.failed;
+    int cancelled = T_LOAD(g_pace_cancelled);   /* before the stop: its teardown must not count */
     kl_http_server_stop(&pace_srv);
     kl_plat_thread_join(&tid);
+    int drains = g_pace.drains, failed = g_pace.failed;
     kl_http_server_free(&pace_srv);
     printf("  paced stream: %zu bytes read, %d drains, cancelled %d, failed %d\n",
            got, drains, cancelled, failed);
@@ -1672,11 +1678,12 @@ static void pace_abandon_case(int *utest_result, KlHttpSuspendHangup policy) {
             got += (size_t)n;
         }
         kl_test_closesock(fd);                            /* unread data: the close resets */
-        for (int i = 0; i < 300 && !g_pace.cancelled; i++) kl_test_sleep_ms(10);
+        for (int i = 0; i < 300 && !T_LOAD(g_pace_cancelled); i++) kl_test_sleep_ms(10);
     }
-    int cancelled = g_pace.cancelled, ended = g_pace.ended;
+    int cancelled = T_LOAD(g_pace_cancelled);   /* before the stop: the stop's own teardown must not count */
     kl_http_server_stop(&pace_srv);
     kl_plat_thread_join(&tid);
+    int ended = g_pace.ended;
     /* Nothing is left suspended, so nothing is left on the hang-up sweep: a reset reported to the
      * write watch as a bare READ (macOS poll) once cancelled the op but kept its sweep count, and the
      * sweep timer then re-armed itself every second for good. */
@@ -1763,10 +1770,11 @@ static void half_close_case(int *utest_result, KlHttpSuspendHangup policy) {
         }
         kl_test_closesock(fd);
     }
-    int cancelled = g_pace.cancelled, failed = g_pace.failed, drains = g_pace.drains;
-    size_t sent = g_pace.sent;
+    int cancelled = T_LOAD(g_pace_cancelled);   /* before the stop, as above */
     kl_http_server_stop(&pace_srv);
     kl_plat_thread_join(&tid);
+    int failed = g_pace.failed, drains = g_pace.drains;
+    size_t sent = g_pace.sent;
     kl_http_server_free(&pace_srv);
     printf("  half-closed paced stream (%s): %zu bytes read, %d drains, cancelled %d, failed %d, "
            "%.0f ms CPU over a %.0f ms stalled pause\n",
@@ -2442,10 +2450,11 @@ typedef struct {
     int mixed;                     /* after each WOULD_BLOCK, write one byte through the legacy writer */
     KlHttpResponseWriteFn w;
     void *wc;
-    int would_blocks, edges, edges_after_end, cancelled, ended, completed;
+    int would_blocks, edges, edges_after_end, ended, completed;
     KlHttpStreamStatus failed;     /* 0 (ACCEPTED) = none */
 } SaStream;
 static SaStream g_sa;
+static int g_sa_cancelled;   /* polled by the test thread: atomic (atomic_flags.h) */
 static int g_sa_mixed;
 static KlHttpServer sa_srv;
 
@@ -2453,11 +2462,11 @@ static void sa_pump(void);
 static void sa_on_writable(void *ud) {
     (void)ud;
     g_sa.edges++;
-    if (g_sa.ended || g_sa.cancelled) { g_sa.edges_after_end++; return; }
+    if (g_sa.ended || T_LOAD(g_sa_cancelled)) { g_sa.edges_after_end++; return; }
     sa_pump();                                       /* a progress point: writing here is allowed */
 }
 static void sa_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_sa.completed = 1; }
-static void sa_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_sa.cancelled++; }
+static void sa_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; T_INC(g_sa_cancelled); }
 static void sa_pump(void) {
     static unsigned char chunk[SA_CAP];
     /* Mixed: chunks that frame to exactly the capacity ("fff8\r\n" + 65528 + CRLF), so any byte
@@ -2507,6 +2516,7 @@ static void handle_sa(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     int mixed = g_sa_mixed;
     memset(&g_sa, 0, sizeof g_sa);
+    T_STORE(g_sa_cancelled, 0);
     g_sa.mixed = mixed;
     g_sa.res = res;
     g_sa.total = SA_TOTAL;
@@ -2601,12 +2611,12 @@ static void bounded_stream_case(int *utest_result, int tls, int mixed) {
     printf("  bounded stream (%s): %ld payload bytes, ended %d, %d would-blocks, %d edges, "
            "max pending %zu (held %zu) of %zu, failed %d, cancelled %d\n", tls ? "tls" : "plain", got,
            ended, g_sa.would_blocks, g_sa.edges, g_sa.max_pending, g_sa.max_held, g_sa.cap,
-           (int)g_sa.failed, g_sa.cancelled);
+           (int)g_sa.failed, T_LOAD(g_sa_cancelled));
     free(raw);
     free(body);
     ASSERT_EQ(g_sa.cap, (size_t)SA_CAP);
     ASSERT_EQ((int)g_sa.failed, 0);
-    ASSERT_EQ(g_sa.cancelled, 0);
+    ASSERT_EQ(T_LOAD(g_sa_cancelled), 0);
     ASSERT_TRUE(g_sa.completed);
     ASSERT_EQ(got, (long)SA_TOTAL);                  /* every byte ... */
     ASSERT_EQ(mismatch, (size_t)-1);                 /* ... in order, exact */
@@ -2650,12 +2660,13 @@ UTEST(completion_output, a_bounded_stream_whose_client_leaves_is_cancelled_witho
         }
         kl_test_sleep_ms(200);                       /* the producer is now blocked on its bound */
         kl_test_closesock(fd);                       /* unread data: the close resets */
-        for (int i = 0; i < 300 && !g_sa.cancelled; i++) kl_test_sleep_ms(10);
+        for (int i = 0; i < 300 && !T_LOAD(g_sa_cancelled); i++) kl_test_sleep_ms(10);
         kl_test_sleep_ms(100);                       /* any late edge would fire meanwhile */
     }
-    int cancelled = g_sa.cancelled, edges_after = g_sa.edges_after_end, wb = g_sa.would_blocks;
+    int cancelled = T_LOAD(g_sa_cancelled);      /* before the stop: its teardown must not count */
     kl_http_server_stop(&sa_srv);
     kl_plat_thread_join(&tid);
+    int edges_after = g_sa.edges_after_end, wb = g_sa.would_blocks;
     kl_http_server_free(&sa_srv);
     ASSERT_TRUE(got > 0);
     ASSERT_GT(wb, 0);                                /* it really was waiting on the edge */
@@ -2672,10 +2683,19 @@ typedef struct {
     KlAsyncOp op;
     KlHttpResponse *res;
     KlHttpConn *conn;
-    volatile int edges, would_blocks, writes_after_edge, ended, completed, cancelled;
+    volatile int writes_after_edge, ended, completed, cancelled;
 } IdStream;
 static IdStream g_id;
 static KlHttpServer id_srv;
+/* Polled by the test thread: atomics (atomic_flags.h). The connection's write watch and state are
+ * loop-owned, so the stats probe's loop hook samples them. */
+static int g_id_edges, g_id_wb, g_id_watched, g_id_suspended;
+static void id_sample_on_loop(KlHttpServer *srv, void *ud) {
+    (void)srv; (void)ud;
+    if (!g_id.conn) return;
+    T_STORE(g_id_watched, g_id.conn->stream_write_watched);
+    T_STORE(g_id_suspended, g_id.conn->state == KL_HTTP_CONN_SUSPENDED);
+}
 
 static void id_finish(void *ud) {
     (void)ud;
@@ -2686,7 +2706,7 @@ static void id_finish(void *ud) {
 }
 static void id_on_writable(void *ud) {
     (void)ud;
-    g_id.edges++;                                    /* and write nothing: idle from here */
+    T_INC(g_id_edges);                               /* and write nothing: idle from here */
     (void)kl_timer_add(kl_http_server_event_ctx(&id_srv), 1500, id_finish, NULL);
 }
 static void id_fill(void *ud) {
@@ -2695,9 +2715,9 @@ static void id_fill(void *ud) {
     memset(chunk, 'i', sizeof chunk);
     for (int i = 0; i < 64; i++) {
         KlHttpStreamStatus st = kl_http_response_stream_try_write(g_id.res, chunk, sizeof chunk);
-        if (st == KL_HTTP_STREAM_WOULD_BLOCK) { g_id.would_blocks++; return; }
+        if (st == KL_HTTP_STREAM_WOULD_BLOCK) { T_INC(g_id_wb); return; }
         if (st != KL_HTTP_STREAM_ACCEPTED) { kl_async_cancel(&id_srv, &g_id.op); return; }
-        if (g_id.edges) g_id.writes_after_edge++;
+        if (T_LOAD(g_id_edges)) g_id.writes_after_edge++;
     }
 }
 static void id_resume(KlAsyncOp *op, void *ud) { (void)op; (void)ud; g_id.completed = 1; }
@@ -2706,6 +2726,8 @@ static int g_id_no_callback;
 static void handle_idle_after_edge(KlHttpRequest *req, KlHttpResponse *res, void *ctx) {
     (void)ctx;
     memset((void *)&g_id, 0, sizeof g_id);
+    T_STORE(g_id_edges, 0);
+    T_STORE(g_id_wb, 0);
     g_id.res = res;
     KlHttpConn *c = kl_http_request_conn(req);
     g_id.conn = c;
@@ -2726,6 +2748,10 @@ static void idle_case(int *utest_result, int no_callback) {
     KlHttpServerConfig cfg = { .port = 0, .max_connections = 4, .stream_capacity = SA_CAP };
     ASSERT_EQ(0, kl_http_server_init(&id_srv, &cfg));
     kl_http_server_route(&id_srv, "GET", "/idle", handle_idle_after_edge, NULL, NULL);
+    g_id.conn = NULL;
+    KlTestStatsProbe probe;
+    ASSERT_EQ(0, kl_test_stats_probe_init(&probe, &id_srv));
+    probe.on_loop = id_sample_on_loop;
     KlPlatThread tid;
     kl_plat_thread_create(&tid, server_thread_fn, &id_srv);
     wait_for_bind(&id_srv);
@@ -2742,14 +2768,17 @@ static void idle_case(int *utest_result, int no_callback) {
         uint64_t start = kl_monotonic_ms(), edge_seen = 0;
         while (kl_monotonic_ms() - start < 10000) {
             /* With no callback there is no edge: idle from the refusal on (the client reads it). */
-            if ((g_id.edges || (no_callback && g_id.would_blocks)) && !edge_seen)
+            if ((T_LOAD(g_id_edges) || (no_callback && T_LOAD(g_id_wb))) && !edge_seen)
                 edge_seen = kl_monotonic_ms();
             if (edge_seen && !measured && kl_monotonic_ms() - edge_seen >= 200) {
                 /* Everything the producer wrote has been read; it now waits on nothing. */
                 measured = 1;
-                edges_at_start = g_id.edges;
-                watched_idle = g_id.conn->stream_write_watched;   /* white-box: no WRITE interest */
-                suspended_idle = g_id.conn->state == KL_HTTP_CONN_SUSPENDED;
+                edges_at_start = T_LOAD(g_id_edges);
+                KlHttpServerStats st;                /* samples the conn on the loop (white-box) */
+                if (kl_test_stats_probe_get(&probe, &st) == 0) {
+                    watched_idle = T_LOAD(g_id_watched);   /* no WRITE interest */
+                    suspended_idle = T_LOAD(g_id_suspended);
+                }
                 double c0 = process_cpu_ms();
                 uint64_t t0 = kl_monotonic_ms();
                 kl_test_sleep_ms(800);               /* the idle window (the stream ends at 1.5 s) */
@@ -2766,9 +2795,10 @@ static void idle_case(int *utest_result, int no_callback) {
         }
         kl_test_closesock(fd);
     }
-    int edges = g_id.edges, wb = g_id.would_blocks, writes_after = g_id.writes_after_edge;
     kl_http_server_stop(&id_srv);
     kl_plat_thread_join(&tid);
+    kl_test_stats_probe_free(&probe);
+    int edges = T_LOAD(g_id_edges), wb = T_LOAD(g_id_wb), writes_after = g_id.writes_after_edge;
     /* Read after the join: the stream's end is written before kl_async_complete runs on_resume, so
      * a client that has read the end may still be ahead of the server thread. */
     int completed = g_id.completed, cancelled = g_id.cancelled;

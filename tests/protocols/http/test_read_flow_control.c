@@ -13,6 +13,7 @@
 #include "../../../src/protocols/http/http_conn_internal.h"
 #include <keel/keel.h>
 #include "net_compat.h"
+#include "atomic_flags.h"    /* reader state set on the loop, checked by the test thread */
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include <string.h>
 #include <time.h>
@@ -26,7 +27,9 @@ static void rfc_nap(int ms) {
 }
 
 /* Results recorded by the reader (survive its destroy). */
-static size_t g_total;
+/* Set by the reader on the loop thread and checked by the test thread while the server runs:
+ * accessed through atomic_flags.h. g_calls is loop-thread only. */
+static int    g_total;
 static int    g_calls;
 static int    g_calls_at_pause;       /* on_data call count when the pause was issued */
 static int    g_resumed;
@@ -41,25 +44,25 @@ typedef struct {
 
 static void rfc_resume(void *ud) {
     PauseReader *r = ud;
-    g_resumed = 1;
+    T_STORE(g_resumed, 1);
     kl_http_request_resume_body(r->req);
 }
 
 static int rfc_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     (void)data;
     PauseReader *r = (PauseReader *)self;
-    g_total += len;
+    kl_test_atomic_add(&g_total, (int)len);
     g_calls++;
     if (!r->paused) {                 /* pause on the first chunk, resume ~30ms later */
         r->paused = 1;
-        g_calls_at_pause = g_calls;
+        T_STORE(g_calls_at_pause, g_calls);
         KlHttpConn *c = kl_http_request_conn(r->req);
         kl_http_request_pause_body(r->req);
         kl_timer_add(c->stream.ctx, 30, rfc_resume, r);
     }
     return 0;
 }
-static void rfc_on_complete(KlHttpBodyReader *self) { (void)self; g_completed = 1; }
+static void rfc_on_complete(KlHttpBodyReader *self) { (void)self; T_STORE(g_completed, 1); }
 static void rfc_on_error(KlHttpBodyReader *self) { (void)self; }
 static void rfc_destroy(KlHttpBodyReader *self) {
     PauseReader *r = (PauseReader *)self;
@@ -101,7 +104,7 @@ static int rfc_connect(int port) {
 }
 
 UTEST(read_flow_control, pause_midbody_then_resume) {
-    g_total = g_calls = g_calls_at_pause = g_resumed = g_completed = 0;
+    g_total = g_calls = g_calls_at_pause = g_resumed = g_completed = 0;   /* before the server thread */
 
     KlHttpServerConfig cfg = { .port = RFC_PORT, .bind_addr = "127.0.0.1" };
     ASSERT_EQ(0, kl_http_server_init(&g_srv, &cfg));
@@ -128,9 +131,9 @@ UTEST(read_flow_control, pause_midbody_then_resume) {
     /* Window: server reads the first half, pauses, then the 30ms timer resumes it. We haven't
      * sent the second half, so a correct pause means reading is stopped meanwhile. */
     rfc_nap(120);   /* > 30ms resume timer */
-    ASSERT_TRUE(g_calls_at_pause >= 1);   /* paused after the first chunk(s) arrived */
-    ASSERT_EQ(1, g_resumed);              /* timer resumed reading */
-    ASSERT_EQ(0, g_completed);            /* body not finished: second half not sent yet */
+    ASSERT_TRUE(T_LOAD(g_calls_at_pause) >= 1);   /* paused after the first chunk(s) arrived */
+    ASSERT_EQ(1, T_LOAD(g_resumed));              /* timer resumed reading */
+    ASSERT_EQ(0, T_LOAD(g_completed));            /* body not finished: second half not sent yet */
 
     memset(half, 'B', sizeof(half));
     ASSERT_EQ((long)RFC_HALF, kl_test_sockwrite(fd, half, RFC_HALF));  /* second half → completes */
@@ -146,8 +149,8 @@ UTEST(read_flow_control, pause_midbody_then_resume) {
     }
     ASSERT_TRUE(strstr(buf, "200 OK") != NULL);
 
-    ASSERT_EQ((size_t)RFC_TOTAL, g_total);   /* no bytes lost across pause/resume */
-    ASSERT_EQ(1, g_completed);               /* orderly finish after resume */
+    ASSERT_EQ(RFC_TOTAL, T_LOAD(g_total));   /* no bytes lost across pause/resume */
+    ASSERT_EQ(1, T_LOAD(g_completed));       /* orderly finish after resume */
 
     kl_test_closesock(fd);
     kl_http_server_stop(&g_srv);
@@ -159,8 +162,8 @@ UTEST(read_flow_control, pause_midbody_then_resume) {
 static int rfc_pause_forever_on_data(KlHttpBodyReader *self, const char *data, size_t len) {
     (void)data;
     PauseReader *r = (PauseReader *)self;
-    g_total += len; g_calls++;
-    if (!r->paused) { r->paused = 1; g_calls_at_pause = g_calls; kl_http_request_pause_body(r->req); }
+    kl_test_atomic_add(&g_total, (int)len); g_calls++;
+    if (!r->paused) { r->paused = 1; T_STORE(g_calls_at_pause, g_calls); kl_http_request_pause_body(r->req); }
     return 0;
 }
 static KlHttpBodyReader *rfc_pause_forever_factory(KlAllocator *alloc, const KlHttpRequest *req, void *ud) {
@@ -180,7 +183,7 @@ static KlHttpBodyReader *rfc_pause_forever_factory(KlAllocator *alloc, const KlH
  * interest off on readiness) must tear down cleanly on kl_http_server_stop: no hang, no leak, no
  * UAF (the ASan run is the oracle for the last two; join returning is the oracle for no-hang). */
 UTEST(read_flow_control, shutdown_while_paused) {
-    g_total = g_calls = g_calls_at_pause = g_resumed = g_completed = 0;
+    g_total = g_calls = g_calls_at_pause = g_resumed = g_completed = 0;   /* before the server thread */
 
     KlHttpServerConfig cfg = { .port = RFC_PORT + 1, .bind_addr = "127.0.0.1" };
     ASSERT_EQ(0, kl_http_server_init(&g_srv, &cfg));
@@ -202,8 +205,8 @@ UTEST(read_flow_control, shutdown_while_paused) {
     ASSERT_EQ((long)RFC_HALF, kl_test_sockwrite(fd, half, RFC_HALF));  /* first half → pause, no resume */
 
     rfc_nap(80);
-    ASSERT_TRUE(g_calls_at_pause >= 1);   /* it did pause */
-    ASSERT_EQ(0, g_completed);            /* and never completed (no resume, no more reads) */
+    ASSERT_TRUE(T_LOAD(g_calls_at_pause) >= 1);   /* it did pause */
+    ASSERT_EQ(0, T_LOAD(g_completed));            /* and never completed (no resume, no more reads) */
 
     /* Tear down with the conn still paused mid-body. join must return (no hang). */
     kl_test_closesock(fd);

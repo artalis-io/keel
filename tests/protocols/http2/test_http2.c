@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "net_compat.h"
+#include "atomic_flags.h"    /* the mock's recv_count, polled across threads by one test */
 #include "platform_thread.h"   /* Keel PAL threads: portable to MSVC */
 #include "http_internal.h"     /* kl_http_server_sweep_conn_timeouts, kl_http_server_settle_h2 */
 #include "event_caps.h"        /* kl_event_caps: is the server's loop a completion loop? */
@@ -102,7 +103,7 @@ static kl_ssize_t mock_recv(KlHttp2ServerSession *self, const void *data, size_t
         m->first_recv_len = len < sizeof(m->first_recv) ? len : sizeof(m->first_recv);
         memcpy(m->first_recv, data, m->first_recv_len);
     }
-    m->recv_count++;
+    T_INC(m->recv_count);
     if (m->recv_return >= 0)
         return (kl_ssize_t)len;
     return m->recv_return;
@@ -2400,12 +2401,12 @@ UTEST(h2, prior_knowledge_preface_reaches_the_session_whole) {
         (void)kl_test_sockwrite(fd, preface, 24);
         (void)kl_test_sockwrite(fd, settings, sizeof settings);
     }
-    for (int i = 0; ok && i < 200 && g_pk_mock.recv_count == 0; i++) kl_test_sleep_ms(10);
-    size_t got = g_pk_mock.first_recv_len;
-    int whole = got >= 24 && memcmp(g_pk_mock.first_recv, preface, 24) == 0;
+    for (int i = 0; ok && i < 200 && T_LOAD(g_pk_mock.recv_count) == 0; i++) kl_test_sleep_ms(10);
     if (fd >= 0) kl_test_closesock(fd);
     kl_http_server_stop(&g_pk_srv);
     kl_plat_thread_join(&t);
+    size_t got = g_pk_mock.first_recv_len;         /* the session's state, read after the join */
+    int whole = got >= 24 && memcmp(g_pk_mock.first_recv, preface, 24) == 0;
     kl_http_server_free(&g_pk_srv);
     test_teardown();
     ASSERT_TRUE(ok);

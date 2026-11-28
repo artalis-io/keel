@@ -129,9 +129,9 @@ static void step(Peer *p, int kind, const char *data, size_t len, int ms) {
 
 static KlTlsConfig g_tls = { .ctx = NULL, .factory = mock_tls_create };
 static void knobs_off(void) {
-    mock_tls_split_record = 0;
-    mock_tls_split_after = 0;
-    mock_tls_write_want = 0;
+    kl_atomic_store_int(&mock_tls_split_record, (int)(0));
+    kl_atomic_store_int(&mock_tls_split_after, (int)(0));
+    kl_atomic_store_int(&mock_tls_write_want, (int)(0));
 }
 
 /* ── Sync client ────────────────────────────────────────────────────────────────────────────── */
@@ -151,7 +151,7 @@ UTEST(tls_client_split, sync_reads_buffered_plaintext_without_waiting) {
     step(&p, STEP_SEND, resp, rl, 0);
     peer_start(&p);
 
-    mock_tls_split_record = rl;                 /* one record carrying the whole response */
+    kl_atomic_store_int(&mock_tls_split_record, (int)(rl));                 /* one record carrying the whole response */
     KlAllocator a = kl_allocator_default();
     KlHttpClientConfig cfg;
     memset(&cfg, 0, sizeof cfg);
@@ -202,8 +202,8 @@ UTEST(tls_client_split, sync_pooled_read_want_is_not_end_of_stream) {
     memset(&a1, 0, sizeof a1);
     memset(&a2, 0, sizeof a2);
     int rc1 = pool_ok ? kl_http_client_request_pooled(&pool, &a, &cfg, "GET", url, NULL, 0, NULL, 0, &a1) : -1;
-    mock_tls_split_after = sizeof r1 - 1;       /* the split starts with the second response */
-    mock_tls_split_record = sizeof r2 - 1;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(sizeof r1 - 1));       /* the split starts with the second response */
+    kl_atomic_store_int(&mock_tls_split_record, (int)(sizeof r2 - 1));
     int rc2 = pool_ok ? kl_http_client_request_pooled(&pool, &a, &cfg, "GET", url, NULL, 0, NULL, 0, &a2) : -1;
     knobs_off();
     int s2 = a2.status;
@@ -250,7 +250,7 @@ UTEST(tls_client_split, async_write_want_is_retried) {
     char url[64];
     snprintf(url, sizeof url, "https://127.0.0.1:%d/", p.port);
     AsyncDone d = { 0, 0, 0 };
-    mock_tls_write_want = 1;                    /* the first write finds the send buffer full */
+    kl_atomic_store_int(&mock_tls_write_want, (int)(1));                    /* the first write finds the send buffer full */
     KlHttpClient *c = ev_ok ? kl_http_client_start(&ev, &a, &cfg, "GET", url, NULL, 0, NULL, 0,
                                                    async_done, &d) : NULL;
     for (int i = 0; c && i < 300 && !d.done; i++) (void)kl_event_ctx_run(&ev, 16, 10);
@@ -315,7 +315,7 @@ UTEST(tls_client_split, ws_client_handshake_record_split) {
     step(&p, STEP_SEND, (const char *)frame, sizeof frame, 0);
     peer_start(&p);
 
-    mock_tls_split_record = 20;                 /* the 101 arrives as a record split after 10 bytes */
+    kl_atomic_store_int(&mock_tls_split_record, (int)(20));                 /* the 101 arrives as a record split after 10 bytes */
     Ws w;
     memset(&w, 0, sizeof w);
     ws_run(&p, &w);
@@ -354,8 +354,8 @@ static void ws_frame_case(int *utest_result, size_t n) {
      * fixed (the accept value is always 28 characters). */
     static char probe[512];
     size_t l101 = ws_101("Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n", probe, sizeof probe);
-    mock_tls_split_after = l101;
-    mock_tls_split_record = fl;
+    kl_atomic_store_int(&mock_tls_split_after, (int)(l101));
+    kl_atomic_store_int(&mock_tls_split_record, (int)(fl));
     Ws w;
     memset(&w, 0, sizeof w);
     ws_run(&p, &w);
