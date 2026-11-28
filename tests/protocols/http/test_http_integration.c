@@ -2008,7 +2008,7 @@ UTEST(integration, paused_body_client_gone_frees_a_clean_slot) {
     int active = -1, probe_failed = 0;
     for (int i = 0; i < 40; i++) {
         KlHttpServerStats st;
-        if (kl_test_stats_probe_get(&probe, &st) != 0) probe_failed = 1;
+        if (kl_test_stats_probe_get(&probe, &st) != 0) { probe_failed = 1; break; }
         active = st.active_connections;
         if (active == 0) break;
         kl_test_sleep_ms(100);

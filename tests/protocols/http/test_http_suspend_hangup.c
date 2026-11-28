@@ -153,10 +153,12 @@ static int loop_sample(void) {
     return kl_test_stats_probe_get(&g_probe, &st);
 }
 
-/* The suspended connection's hang-up state (read while it is still suspended). */
+/* The suspended connection's hang-up state (read while it is still suspended); -1 for no conn,
+ * HUP_PROBE_FAILED if the loop did not answer. */
+#define HUP_PROBE_FAILED (-2)
 static int hup_state_of(int i) {
     T_STORE(g_probe_park, i);
-    return loop_sample() == 0 ? T_LOAD(g_seen_hup_state) : -1;
+    return loop_sample() == 0 ? T_LOAD(g_seen_hup_state) : HUP_PROBE_FAILED;
 }
 static int sweep_armed(void) {
     T_STORE(g_probe_park, -1);
@@ -191,7 +193,12 @@ static void start_tls(KlHttpSuspendHangup policy, int tls) { start_ex(policy, tl
 static void start(KlHttpSuspendHangup policy) { start_ex(policy, 0, NULL); }
 
 static int wait_hup_state(int i, int want, int ms) {
-    for (int k = 0; k < ms / 10 && hup_state_of(i) != want; k++) kl_test_sleep_ms(10);
+    for (int k = 0; k < ms / 10; k++) {
+        int st = hup_state_of(i);
+        if (st == want) return 1;
+        if (st == HUP_PROBE_FAILED) return 0;   /* the loop did not answer: fail now, not in 2 s steps */
+        kl_test_sleep_ms(10);
+    }
     return hup_state_of(i) == want;
 }
 

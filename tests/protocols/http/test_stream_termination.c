@@ -1060,7 +1060,7 @@ UTEST(stream_termination, a_non_reading_client_of_a_committed_answer_ends_by_the
     int held = st.active_connections;
     uint64_t t1 = t0;
     for (;;) {
-        if (kl_test_stats_probe_get(&g_probe, &st) != 0) probe_failed = 1;
+        if (kl_test_stats_probe_get(&g_probe, &st) != 0) { probe_failed = 1; break; }
         t1 = kl_monotonic_ms();
         if (st.active_connections == 0 || t1 - t0 > 10000) break;
         kl_test_sleep_ms(20);

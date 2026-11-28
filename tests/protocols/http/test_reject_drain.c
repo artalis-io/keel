@@ -701,7 +701,7 @@ static void body_with_headers_case(int *utest_result, const char *path) {
     int active = -1, probe_failed = 0;
     for (int i = 0; i < 300; i++) {
         KlHttpServerStats st;
-        if (kl_test_stats_probe_get(&rd_probe, &st) != 0) probe_failed = 1;
+        if (kl_test_stats_probe_get(&rd_probe, &st) != 0) { probe_failed = 1; break; }
         active = st.active_connections;
         if (active == 0) break;
         kl_test_sleep_ms(10);

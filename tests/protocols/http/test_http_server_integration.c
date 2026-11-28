@@ -4,8 +4,8 @@
 #include <keel/keel.h>
 #include "socket.h"   /* internal: exercise the socket-provider seam */
 #include "event_caps.h"   /* internal: kl_event_caps (which event model the server got) */
-#include "event_builtin.h"
-#include "completion.h"   /* kl_comp_ops_builtin: the built-in completion table, wrapped below */   /* the built-in backend, wrapped below so registering the listener fails */
+#include "event_builtin.h"   /* the built-in backend, wrapped below so registering the listener fails */
+#include "completion.h"   /* kl_comp_ops_builtin: the built-in completion table, wrapped below */
 #include "net_compat.h"
 #include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
 #include <string.h>
