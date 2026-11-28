@@ -2,6 +2,7 @@
 #include <keel/clock.h>
 #include <keel/dns_resolver.h>
 #include <keel/resolver.h>
+#include <keel/resolver_cache.h>  /* the cache decorator over the built-in resolver */
 #include <keel/datagram.h>          /* the fake nameserver + spoofer are bound KlDatagrams */
 #include <keel/datagram_detail.h>   /* stack-allocate KlDatagram */
 #include "datagram_test_util.h"     /* kl_dg_close_free: PUBLIC close/drive/free lifecycle */
@@ -776,6 +777,92 @@ UTEST(dns, destroy_from_done_on_timeout) {
     pump(&ctx, &g_done, 400);  /* timeout timer → dns_complete(error) → done → destroy (timer, no datagram frame) */
     ASSERT_EQ(1, g_done);
     ASSERT_NE(0, g_err);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+}
+
+/* ── A resolver cache over the built-in resolver, destroyed with lookups in flight ── */
+/* The cache's own allocations are counted: a per-request handle left registered with the DNS
+ * resolver (and so never freed) shows up as a live block after both are destroyed. */
+static long g_cache_live;
+static void *cache_cnt_malloc(void *c, size_t n) {
+    (void)c; void *p = malloc(n ? n : 1); if (p) g_cache_live++; return p;
+}
+static void *cache_cnt_realloc(void *c, void *p, size_t o, size_t n) {
+    (void)c; (void)o; void *q = realloc(p, n ? n : 1); if (q && !p) g_cache_live++; return q;
+}
+static void cache_cnt_free(void *c, void *p, size_t n) {
+    (void)c; (void)n; if (p) { g_cache_live--; free(p); }
+}
+
+UTEST(dns, cache_destroyed_with_lookups_in_flight) {
+    reset_dns();
+    g_silent = 1;                        /* the lookups stay in flight */
+    KlAllocator alloc = kl_allocator_default();
+    KlAllocator calloc_ = { cache_cnt_malloc, cache_cnt_realloc, cache_cnt_free, NULL };
+    g_cache_live = 0;
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 5000, 2);
+    ASSERT_TRUE(r != NULL);
+    KlResolver *cache = kl_resolver_cache_create(r, NULL, &calloc_);
+    ASSERT_TRUE(cache != NULL);
+
+    ASSERT_TRUE(cache->resolve(cache, &ctx, "a.test", 80, on_done, NULL) != NULL);
+    ASSERT_TRUE(cache->resolve(cache, &ctx, "b.test", 80, on_done, NULL) != NULL);
+    kl_event_ctx_run(&ctx, 16, 10);      /* let the queries go out */
+
+    /* Documented order: the cache, then the inner resolver. */
+    cache->destroy(cache);
+    ASSERT_EQ(0, g_cache_live);          /* no cache request left behind */
+    for (int i = 0; i < 5; i++)
+        kl_event_ctx_run(&ctx, 16, 10);
+    ASSERT_EQ(0, g_done);                /* cancelled lookups report nothing */
+    r->destroy(r);
+    kl_dg_close_free(&ctx, &ns);
+    kl_event_ctx_free(&ctx);
+}
+
+static KlResolver *g_cache_to_destroy;
+static KlResolver *g_inner_to_destroy;
+static void on_done_destroy_cache(KlResolveReq *req, const KlResolveResult *result, int error,
+                                  void *ud) {
+    (void)req; (void)result; (void)ud;
+    g_done++;
+    g_err = error;
+    KlResolver *c = g_cache_to_destroy; g_cache_to_destroy = NULL;
+    KlResolver *in = g_inner_to_destroy; g_inner_to_destroy = NULL;
+    if (c) c->destroy(c);                /* cancels the sibling lookup still in flight */
+    if (in) in->destroy(in);             /* deferred by the DNS resolver to dns_complete's tail */
+}
+
+UTEST(dns, cache_destroyed_from_done_with_sibling_in_flight) {
+    reset_dns();
+    g_silent = 1;                        /* the hostname lookup never answers */
+    KlAllocator alloc = kl_allocator_default();
+    KlAllocator calloc_ = { cache_cnt_malloc, cache_cnt_realloc, cache_cnt_free, NULL };
+    g_cache_live = 0;
+    KlEventCtx ctx;
+    ASSERT_EQ(0, kl_event_ctx_init(&ctx, &alloc));
+    KlDatagram ns;
+    KlResolver *r = make_resolver(&ctx, &ns, 5000, 2);
+    ASSERT_TRUE(r != NULL);
+    KlResolver *cache = kl_resolver_cache_create(r, NULL, &calloc_);
+    ASSERT_TRUE(cache != NULL);
+
+    ASSERT_TRUE(cache->resolve(cache, &ctx, "host.test", 80, on_done_destroy_cache, NULL) != NULL);
+    /* A literal completes from a 0-timer inside the DNS resolver's dns_complete. */
+    ASSERT_TRUE(cache->resolve(cache, &ctx, "192.0.2.10", 1234, on_done_destroy_cache, NULL) != NULL);
+    g_cache_to_destroy = cache;
+    g_inner_to_destroy = r;
+    pump(&ctx, &g_done, 50);
+    ASSERT_EQ(1, g_done);
+    ASSERT_EQ(0, g_err);
+    ASSERT_EQ(0, g_cache_live);          /* cache and both of its requests released */
+    for (int i = 0; i < 5; i++)
+        kl_event_ctx_run(&ctx, 16, 10);
+    ASSERT_EQ(1, g_done);                /* the cancelled sibling never reports */
     kl_dg_close_free(&ctx, &ns);
     kl_event_ctx_free(&ctx);
 }
