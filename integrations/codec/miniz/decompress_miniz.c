@@ -327,7 +327,10 @@ static int miniz_feed(KlMinizDecompSession *s, const char *data, size_t len, int
                       size_t *consumed,
                       int (*emit)(void *ctx, const char *data, size_t len),
                       void *emit_ctx, int stoppable) {
-    const unsigned char *p = (const unsigned char *)data;
+    /* A drain call (resuming a stopped feed, or the final flush) passes data == NULL with len 0.
+     * Start from an empty, non-null buffer so every `p + n` below, and the input pointer handed to
+     * tinfl, is arithmetic on a real object (pointer arithmetic on NULL is undefined, even + 0). */
+    const unsigned char *p = data ? (const unsigned char *)data : (const unsigned char *)"";
     size_t remaining = len;
     *consumed = len;
 
@@ -439,7 +442,8 @@ static int miniz_feed(KlMinizDecompSession *s, const char *data, size_t len, int
             s->more_out = 0;
             /* Remaining bytes should be the 8-byte trailer */
             if (remaining <= 8) {
-                memcpy(s->trail_buf + s->trail_len, p, remaining);
+                if (remaining > 0)
+                    memcpy(s->trail_buf + s->trail_len, p, remaining);
                 s->trail_len += remaining;
                 remaining = 0;
             }

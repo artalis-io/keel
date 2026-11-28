@@ -87,6 +87,11 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   any handle a caller still holds becomes invalid at destroy. `resolver.h` now states what every
   `KlResolver` implementation's `cancel()` must guarantee (no later `done_fn`) and the destroy
   behaviour of the in-tree resolvers.
+- **miniz codec: no pointer arithmetic on NULL when draining.** The streaming gzip decoder is called
+  with no input (`data == NULL`, length 0) to drain output a stopped feed left behind and for the
+  final flush. It advanced that NULL pointer by zero and handed it to `tinfl_decompress`, which C
+  leaves undefined (clang's UBSan aborts on it). It now starts from an empty buffer instead. The
+  miniz regression tests in CI are built with clang so its sanitizer checks this.
 
 ## [3.6.0]
 
