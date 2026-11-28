@@ -79,10 +79,26 @@ struct KlResolver {
                               const char *host, int port,
                               KlResolveDoneFn done_fn, void *user_data);
 
-    /** Cancel an in-flight request. May be called during shutdown. */
+    /**
+     * Cancel an in-flight request. May be called during shutdown.
+     *
+     * Required of every implementation: cancel() never calls done_fn, and once it returns done_fn
+     * is never called for that request; the resolver releases the handle. Decorators (such as the
+     * resolver cache) rely on this to free their own per-request state at cancel or destroy. It may
+     * be called from inside any done_fn, including the done_fn of the request being cancelled
+     * (then it only releases the handle once that done_fn returns).
+     */
     void (*cancel)(KlResolveReq *req);
 
-    /** Destroy the resolver (free any shared state). */
+    /**
+     * Destroy the resolver (free any shared state).
+     *
+     * Callers should cancel their requests first. The in-tree resolvers (the built-in DNS resolver
+     * and the resolver cache) also accept destroy with requests in flight: each such request is
+     * cancelled as by cancel(), so its done_fn is never called and its handle becomes invalid.
+     * destroy may be called from inside a done_fn of this resolver; the teardown completes once
+     * that callback returns. Third-party resolvers should provide the same.
+     */
     void (*destroy)(KlResolver *self);
 };
 

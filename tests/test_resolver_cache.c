@@ -561,4 +561,296 @@ UTEST(rescache, sync_completion_leaves_nothing_allocated) {
     ASSERT_EQ(g_live_blocks, 0);
 }
 
+/* ── Destroy with lookups in flight ──────────────────────────────── */
+/*
+ * A multi-request inner resolver with a reliable cancel (resolver.h): each
+ * resolve takes a slot; cancel retires the slot so it is never completed;
+ * mr_complete_all() answers every live slot, as a shared inner resolver that
+ * outlives the cache would. The cache's own allocations go through the
+ * counting allocator above, so a leaked per-request handle shows up in
+ * g_live_blocks (and under LSan).
+ */
+#define MR_SLOTS 8
+typedef struct {
+    KlResolveReq    base;
+    KlResolveDoneFn done;
+    void           *ud;
+    int             live;
+} MrReq;
+static MrReq mr_slots[MR_SLOTS];
+static int   mr_cancels;
+static int   mr_cancel_dead;      /* cancel() on a slot that was not live: a contract breach */
+
+static KlResolveReq *mr_resolve(KlResolver *self, KlEventCtx *ctx, const char *host, int port,
+                                KlResolveDoneFn done_fn, void *user_data)
+{
+    (void)ctx; (void)host; (void)port;
+    for (int i = 0; i < MR_SLOTS; i++) {
+        if (!mr_slots[i].live) {
+            mr_slots[i].base.resolver = self;
+            mr_slots[i].done = done_fn;
+            mr_slots[i].ud = user_data;
+            mr_slots[i].live = 1;
+            return &mr_slots[i].base;
+        }
+    }
+    return NULL;
+}
+static void mr_cancel(KlResolveReq *req)
+{
+    MrReq *m = (MrReq *)req;
+    mr_cancels++;
+    if (!m->live)
+        mr_cancel_dead++;
+    m->live = 0;
+}
+static void mr_destroy(KlResolver *self) { (void)self; }
+
+static void mr_reset(void)
+{
+    memset(mr_slots, 0, sizeof(mr_slots));
+    mr_cancels = 0;
+    mr_cancel_dead = 0;
+}
+static int mr_live(void)
+{
+    int n = 0;
+    for (int i = 0; i < MR_SLOTS; i++)
+        n += mr_slots[i].live;
+    return n;
+}
+/* Complete slot i (if still live) with a success result. */
+static void mr_complete(int i)
+{
+    if (!mr_slots[i].live)
+        return;
+    mr_slots[i].live = 0;
+    KlResolveResult r = make_result();
+    mr_slots[i].done(&mr_slots[i].base, &r, 0, mr_slots[i].ud);
+}
+static void mr_complete_all(void)
+{
+    for (int i = 0; i < MR_SLOTS; i++)
+        mr_complete(i);
+}
+
+UTEST(rescache, destroy_with_lookups_in_flight_cancels_them) {
+    reset_done();
+    mr_reset();
+    KlAllocator a = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    KlResolver inner = { .resolve = mr_resolve, .cancel = mr_cancel, .destroy = mr_destroy };
+    g_live_blocks = 0;
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+
+    ASSERT_TRUE(cache->resolve(cache, NULL, "a.test", 80, test_done_fn, NULL) != NULL);
+    ASSERT_TRUE(cache->resolve(cache, NULL, "b.test", 80, test_done_fn, NULL) != NULL);
+    ASSERT_TRUE(cache->resolve(cache, NULL, "a.test", 443, test_done_fn, NULL) != NULL);
+    ASSERT_EQ(mr_live(), 3);
+
+    /* Documented order: the cache first, then the inner resolver. */
+    cache->destroy(cache);
+    ASSERT_EQ(mr_cancels, 3);          /* every outstanding lookup cancelled with the inner */
+    ASSERT_EQ(mr_cancel_dead, 0);
+    ASSERT_EQ(mr_live(), 0);           /* nothing left registered with the inner */
+    ASSERT_EQ(g_live_blocks, 0);       /* no per-request handle leaked */
+    ASSERT_EQ(done_called, 0);         /* cancelled callers get no callback */
+    inner.destroy(&inner);
+}
+
+UTEST(rescache, cancelled_lookup_not_cancelled_again_by_destroy) {
+    reset_done();
+    mr_reset();
+    KlAllocator a = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    KlResolver inner = { .resolve = mr_resolve, .cancel = mr_cancel, .destroy = mr_destroy };
+    g_live_blocks = 0;
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+
+    KlResolveReq *ra = cache->resolve(cache, NULL, "a.test", 80, test_done_fn, NULL);
+    KlResolveReq *rb = cache->resolve(cache, NULL, "b.test", 80, test_done_fn, NULL);
+    KlResolveReq *rc = cache->resolve(cache, NULL, "c.test", 80, test_done_fn, NULL);
+    ASSERT_TRUE(ra && rb && rc);
+    cache->cancel(rb);                 /* middle of the pending list */
+    mr_complete(0);                    /* a.test completes normally */
+    ASSERT_EQ(done_called, 1);
+    ASSERT_EQ(mr_cancels, 1);
+
+    cache->destroy(cache);             /* only c.test is still pending */
+    ASSERT_EQ(mr_cancels, 2);
+    ASSERT_EQ(mr_cancel_dead, 0);
+    ASSERT_EQ(mr_live(), 0);
+    ASSERT_EQ(g_live_blocks, 0);
+    ASSERT_EQ(done_called, 1);
+}
+
+UTEST(rescache, shared_inner_completes_after_cache_destroy) {
+    /* The inner resolver is borrowed and may be shared: it keeps running after the cache is gone
+     * and answers its other users' lookups. None of those answers may reach the freed cache
+     * (ASan: heap-use-after-free in cache_insert before the fix). */
+    reset_done();
+    mr_reset();
+    KlAllocator a = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    KlResolver inner = { .resolve = mr_resolve, .cancel = mr_cancel, .destroy = mr_destroy };
+    g_live_blocks = 0;
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+
+    ASSERT_TRUE(cache->resolve(cache, NULL, "a.test", 80, test_done_fn, NULL) != NULL);
+    int other_done_before = done_called;
+    /* Another user of the same inner resolver, not through the cache. */
+    ASSERT_TRUE(inner.resolve(&inner, NULL, "direct.test", 80, test_done_fn, NULL) != NULL);
+    ASSERT_TRUE(cache->resolve(cache, NULL, "b.test", 80, test_done_fn, NULL) != NULL);
+
+    cache->destroy(cache);
+    ASSERT_EQ(g_live_blocks, 0);
+    ASSERT_EQ(mr_live(), 1);           /* only the direct lookup remains */
+
+    mr_complete_all();                 /* the inner answers whatever it still holds */
+    ASSERT_EQ(done_called, other_done_before + 1);   /* the direct user only */
+    ASSERT_EQ(mr_live(), 0);
+}
+
+static KlResolver *g_destroy_in_done_cache;
+static KlResolver *g_destroy_in_done_inner;
+static void destroy_in_done_fn(KlResolveReq *req, const KlResolveResult *result,
+                               int error, void *user_data)
+{
+    (void)req; (void)result; (void)error; (void)user_data;
+    done_called++;
+    if (g_destroy_in_done_cache) {
+        KlResolver *c = g_destroy_in_done_cache;
+        g_destroy_in_done_cache = NULL;
+        c->destroy(c);
+        if (g_destroy_in_done_inner) {         /* documented order, from inside the callback */
+            KlResolver *in = g_destroy_in_done_inner;
+            g_destroy_in_done_inner = NULL;
+            in->destroy(in);
+        }
+    }
+}
+
+UTEST(rescache, destroy_from_inside_async_done_fn) {
+    reset_done();
+    mr_reset();
+    KlAllocator a = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    static KlResolver inner;   /* static: its address is kept in a file-scope pointer */
+    inner = (KlResolver){ .resolve = mr_resolve, .cancel = mr_cancel, .destroy = mr_destroy };
+    g_live_blocks = 0;
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+
+    ASSERT_TRUE(cache->resolve(cache, NULL, "a.test", 80, destroy_in_done_fn, NULL) != NULL);
+    ASSERT_TRUE(cache->resolve(cache, NULL, "b.test", 80, destroy_in_done_fn, NULL) != NULL);
+    ASSERT_TRUE(cache->resolve(cache, NULL, "c.test", 80, destroy_in_done_fn, NULL) != NULL);
+
+    g_destroy_in_done_cache = cache;
+    g_destroy_in_done_inner = &inner;
+    mr_complete(1);                    /* b.test answers; its done_fn destroys cache + inner */
+    ASSERT_EQ(done_called, 1);
+    ASSERT_EQ(mr_cancels, 2);          /* a.test and c.test cancelled, not b.test */
+    ASSERT_EQ(mr_cancel_dead, 0);
+    ASSERT_EQ(mr_live(), 0);
+    ASSERT_EQ(g_live_blocks, 0);       /* cache freed once the callback returned */
+
+    mr_complete_all();                 /* nothing left to deliver */
+    ASSERT_EQ(done_called, 1);
+}
+
+UTEST(rescache, destroy_from_inside_sync_done_fn_cache_hit) {
+    reset_done();
+    mr_reset();
+    KlAllocator a = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    KlResolver inner = { .resolve = mr_resolve, .cancel = mr_cancel, .destroy = mr_destroy };
+    g_live_blocks = 0;
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+
+    /* Warm a.test, then leave b.test in flight. */
+    ASSERT_TRUE(cache->resolve(cache, NULL, "a.test", 80, test_done_fn, NULL) != NULL);
+    mr_complete(0);
+    ASSERT_EQ(kl_resolver_cache_count(cache), 1);
+    ASSERT_TRUE(cache->resolve(cache, NULL, "b.test", 80, destroy_in_done_fn, NULL) != NULL);
+
+    /* A hit delivers synchronously inside resolve(); its done_fn destroys the cache. */
+    g_destroy_in_done_cache = cache;
+    g_destroy_in_done_inner = NULL;
+    KlResolveReq *r = cache->resolve(cache, NULL, "a.test", 80, destroy_in_done_fn, NULL);
+    ASSERT_TRUE(r == NULL);
+    ASSERT_EQ(done_called, 2);
+    ASSERT_EQ(mr_cancels, 1);          /* b.test */
+    ASSERT_EQ(mr_live(), 0);
+    ASSERT_EQ(g_live_blocks, 0);
+}
+
+/* Inner whose resolve() completes synchronously, through the slot machinery. */
+static KlResolveReq *mr_resolve_sync(KlResolver *self, KlEventCtx *ctx, const char *host, int port,
+                                     KlResolveDoneFn done_fn, void *user_data)
+{
+    if (strcmp(host, "sync.test") != 0)
+        return mr_resolve(self, ctx, host, port, done_fn, user_data);
+    KlResolveReq *rq = mr_resolve(self, ctx, host, port, done_fn, user_data);
+    if (rq)
+        mr_complete((int)((MrReq *)rq - mr_slots));
+    return rq;
+}
+
+UTEST(rescache, destroy_from_inside_sync_done_fn_cache_miss) {
+    reset_done();
+    mr_reset();
+    KlAllocator a = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    KlResolver inner = { .resolve = mr_resolve_sync, .cancel = mr_cancel, .destroy = mr_destroy };
+    g_live_blocks = 0;
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+
+    ASSERT_TRUE(cache->resolve(cache, NULL, "b.test", 80, test_done_fn, NULL) != NULL);
+
+    /* The inner completes inside inner->resolve(); the done_fn destroys the cache there. */
+    g_destroy_in_done_cache = cache;
+    g_destroy_in_done_inner = NULL;
+    KlResolveReq *r = cache->resolve(cache, NULL, "sync.test", 80, destroy_in_done_fn, NULL);
+    ASSERT_TRUE(r == NULL);
+    ASSERT_EQ(done_called, 1);
+    ASSERT_EQ(mr_cancels, 1);          /* b.test */
+    ASSERT_EQ(mr_cancel_dead, 0);
+    ASSERT_EQ(mr_live(), 0);
+    ASSERT_EQ(g_live_blocks, 0);
+}
+
+/* Inner whose resolve() for "other.test" first delivers another pending lookup (slot 0), then
+ * returns its own request still in flight: a callback for a different request runs inside
+ * inner->resolve(). */
+static KlResolveReq *mr_resolve_deliver_other(KlResolver *self, KlEventCtx *ctx, const char *host,
+                                              int port, KlResolveDoneFn done_fn, void *user_data)
+{
+    KlResolveReq *rq = mr_resolve(self, ctx, host, port, done_fn, user_data);
+    if (strcmp(host, "other.test") == 0)
+        mr_complete(0);
+    return rq;
+}
+
+UTEST(rescache, destroy_inside_resolve_by_another_lookups_done_fn) {
+    reset_done();
+    mr_reset();
+    KlAllocator a = { cnt_malloc, cnt_realloc, cnt_free, NULL };
+    KlResolver inner = { .resolve = mr_resolve_deliver_other, .cancel = mr_cancel,
+                         .destroy = mr_destroy };
+    g_live_blocks = 0;
+    KlResolver *cache = kl_resolver_cache_create(&inner, NULL, &a);
+    ASSERT_TRUE(cache != NULL);
+
+    ASSERT_TRUE(cache->resolve(cache, NULL, "a.test", 80, destroy_in_done_fn, NULL) != NULL);
+    g_destroy_in_done_cache = cache;
+    g_destroy_in_done_inner = NULL;
+    /* a.test's done_fn runs inside this resolve and destroys the cache; the new lookup must be
+     * cancelled with the inner, not handed back on a dead cache. */
+    KlResolveReq *r = cache->resolve(cache, NULL, "other.test", 80, test_done_fn, NULL);
+    ASSERT_TRUE(r == NULL);
+    ASSERT_EQ(done_called, 1);
+    ASSERT_EQ(mr_cancels, 1);          /* other.test */
+    ASSERT_EQ(mr_live(), 0);
+    ASSERT_EQ(g_live_blocks, 0);
+}
+
 UTEST_MAIN();

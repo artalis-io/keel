@@ -41,6 +41,15 @@ typedef struct {
  * destroy function.  The inner resolver is borrowed (not owned); the
  * caller must destroy it separately after destroying the cache.
  *
+ * Each cache miss is forwarded to the inner resolver as its own request
+ * (lookups are not coalesced).  Destroying the cache with lookups still in
+ * flight is allowed: destroy cancels each with the inner resolver's cancel()
+ * and frees it, so their done_fn is never called, their handles become
+ * invalid, and nothing is left registered with the inner resolver.  This
+ * relies on the inner resolver's cancel() guaranteeing no later done_fn
+ * (resolver.h).  destroy may be called from inside a done_fn delivered by the
+ * cache; the cache is freed once that callback returns.
+ *
  * @param inner  Inner resolver to delegate cache misses to (borrowed).
  * @param cfg    Config (NULL = defaults: 64 entries, 60 s TTL).
  * @param alloc  Allocator (borrowed).

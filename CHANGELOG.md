@@ -76,6 +76,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   The first server to return also stopped the other from receiving signals. The dispositions in place
   before the first install are now saved once and put back when the server receiving signals (the
   last to install) returns; an earlier server's return changes nothing.
+- **Destroying a resolver cache with lookups in flight.** The cache's destroy freed the cache but left
+  each outstanding lookup registered with the borrowed inner resolver. If that resolver answered one
+  later (it may be shared, or simply outlive the cache), the answer was written into the freed cache;
+  in the documented order (the cache, then the inner resolver) each such lookup leaked instead.
+  Destroy now cancels every outstanding lookup with the inner resolver and frees it: its `done_fn` is
+  never called, as after `cancel()`. Destroying the cache from inside one of its `done_fn` callbacks
+  is also handled (the cache is freed once the callback returns). `resolver.h` now states what every
+  `KlResolver` implementation's `cancel()` must guarantee (no later `done_fn`) and the destroy
+  behaviour of the in-tree resolvers.
 
 ## [3.6.0]
 
