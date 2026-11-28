@@ -333,6 +333,18 @@ KlHttpConnState kl_http_conn_reject_head(KlHttpConn *c, const char *resp, size_t
  * only call this once the write is physically retired. Returns DRAINING or CLOSED. */
 KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c);
 
+/* End a connection whose protocol finished it (a done HTTP/2 session: its GOAWAY out, no stream
+ * left) without a reset: a close over unread input (the client's frames that crossed the GOAWAY) is
+ * a reset, which drops what the server's send queue still holds. So it half-closes once its output
+ * is out (TLS: close_notify first) and lingers in DRAINING, reading and discarding unframed, until
+ * the client's FIN, past the linger's cap only the hang-up, or read_timeout_ms (answer_linger_ms).
+ * The bounds are the rejection drain's (reject_drain_max_bytes, max_body_size), and
+ * reject_drain_disable turns it off: CLOSED then, as for a fd already gone. Readiness half-closes
+ * here; a completion-driven connection marks it for its output queue (comp_tlsq_then_shutwr), and
+ * the caller puts the queued output (and a TLS engine's) on its way and keeps a receive posted
+ * (kl_http_comp_linger). */
+KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c);
+
 /* One bounded, non-blocking drain read. Returns DRAINING to stay, or CLOSED on body consumed,
  * peer EOF, budget exhaustion, deadline expiry or socket error. */
 /* Account nread bytes already sitting in read_buf and decide whether to keep draining: the single

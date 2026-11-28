@@ -31,6 +31,10 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
             if (p < 0) { kl_comp_close(s, c); return; }
             if (p == 0) break;                         /* WANT_READ, batch done */
             KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, (size_t)p);
+            if (st == KL_HTTP_CONN_DRAINING) {         /* done: the linger (later records discarded) */
+                kl_http_comp_linger(s, c);
+                return;
+            }
             if (st != KL_HTTP_CONN_HTTP2) {            /* send a GOAWAY the session queued, then close */
                 if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
                 kl_comp_close_after_output(s, c);
@@ -50,6 +54,10 @@ void kl_comp_http2_drive(struct KlHttpServer *s, KlHttpConn *c) {
      * for the others. */
     KlHttpConnState st = kl_http2_server_feed(c, c->stream.read_buf, c->stream.read_len);
     c->stream.read_len = 0;
+    if (st == KL_HTTP_CONN_DRAINING) {                 /* done: the linger, once the output is out */
+        kl_http_comp_linger(s, c);
+        return;
+    }
     if (st != KL_HTTP_CONN_HTTP2) {                    /* send a GOAWAY the session queued, then close */
         kl_comp_close_after_output(s, c);
         return;

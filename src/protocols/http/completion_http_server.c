@@ -573,6 +573,20 @@ void kl_http_comp_tls_finish(struct KlHttpServer *s, KlHttpConn *c, int draining
     kl_comp_close_after_output(s, c);
 }
 
+/* completion_http.h: a connection that entered the lingering half-close (kl_http_conn_begin_linger)
+ * with output possibly still queued, or still in its TLS engine (the close_notify among it): send
+ * it, half-close once it is out (comp_tlsq_then_shutwr), and keep one receive posted, whose
+ * completion discards (the DRAINING branch of comp_on_read). A receive already posted (an HTTP/2
+ * connection reads alongside its output) is that receive. */
+void kl_http_comp_linger(struct KlHttpServer *s, KlHttpConn *c) {
+    if (kl_comp_tls_flush(c) < 0) { kl_comp_close(s, c); return; }
+    if (comp_tlsq_settle(s, c)) return;
+    c->comp_tlsq_then_recv = 0;
+    if (c->comp_recv_posted) return;
+    c->stream.read_len = 0;
+    if (kl_comp_post_recv(c) < 0) kl_comp_close(s, c);
+}
+
 /* Copy a plaintext response onto the (idle) output queue and mark its end: the queue posts it in
  * pieces no larger than the backend takes, and comp_on_write completes the response once every byte
  * up to the mark is out (comp_tls_on_write). 0, or -1 on allocation or post failure (caller closes). */

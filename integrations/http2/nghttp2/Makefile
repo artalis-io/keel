@@ -84,6 +84,9 @@ e2e: $(LIB)
 	$(CC) $(CFLAGS) -o tests/e2e_h2_stream_control tests/e2e_h2_stream_control.c \
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
 	./tests/e2e_h2_stream_control
+	$(CC) $(CFLAGS) -o tests/e2e_h2_drain_linger tests/e2e_h2_drain_linger.c \
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) -lpthread
+	./tests/e2e_h2_drain_linger
 	@echo "integrations/http2/nghttp2: e2e (real socket) OK"
 	$(CC) $(CFLAGS) -o tests/test_client_interim tests/test_client_interim.c \
 	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS)
@@ -190,10 +193,23 @@ alpn-interop: $(LIB)
 	  test $$kcrc -eq 0 || { echo "FAIL: KEEL client did not complete h2 over TLS"; exit 1; }; \
 	  echo "integrations/http2/nghttp2: ALPN interop OK (external + KEEL client, h2 + http/1.1, one shared handler)"
 
+# The graceful-drain linger over real TLS: e2e_h2_drain_linger with its TLS case, the server on the
+# OpenSSL adapter (ALPN h2), the client on OpenSSL directly. Requires NGHTTP2_DIR and OPENSSL_DIR
+# (BYO, out of CI).
+e2e-tls: $(LIB)
+	@test -n "$(OPENSSL_DIR)" || { echo "set OPENSSL_DIR (and NGHTTP2_DIR)"; exit 1; }
+	@test -f $(KEEL_ROOT)/libkeel.a || { echo "build core first: (cd $(KEEL_ROOT) && make)"; exit 1; }
+	$(CC) $(CFLAGS) -DE2E_TLS -I$(KEEL_ROOT)/src -I../../tls/openssl -I$(OPENSSL_DIR)/include \
+	  -o tests/e2e_h2_drain_linger_tls tests/e2e_h2_drain_linger.c ../../tls/openssl/tls_openssl.c \
+	  -L. -lkeel_http2_nghttp2 -L$(KEEL_ROOT) -lkeel $(NGHTTP2_LIBS) \
+	  -L$(OPENSSL_DIR)/lib -lssl -lcrypto -lpthread
+	./tests/e2e_h2_drain_linger_tls
+
 clean:
 	rm -f $(LIB) $(OBJ) http2_nghttp2_client.d http2_nghttp2_server.d \
 	      tests/test_roundtrip tests/test_destroy_open_streams tests/test_rst_after_response tests/test_h2_limits tests/e2e_socket tests/e2e_idle tests/e2e_h2c_upgrade tests/interop_server tests/client_probe \
-	      tests/alpn_server tests/alpn_client tests/test_client_interim
+	      tests/alpn_server tests/alpn_client tests/test_client_interim \
+	      tests/e2e_h2_drain_linger tests/e2e_h2_drain_linger_tls
 	rm -rf tests/*.dSYM
 
-.PHONY: all test e2e interop-curl h2spec h2load interop-nghttpd alpn-interop clean
+.PHONY: e2e-tls all test e2e interop-curl h2spec h2load interop-nghttpd alpn-interop clean

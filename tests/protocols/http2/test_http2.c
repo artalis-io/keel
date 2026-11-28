@@ -18,6 +18,12 @@
 #include "event_caps.h"        /* kl_event_caps: is the server's loop a completion loop? */
 #include <keel/clock.h>
 
+#if defined(_WIN32)
+#define T_SHUT_WR SD_SEND
+#else
+#define T_SHUT_WR SHUT_WR
+#endif
+
 /* ═══════════════════════════════════════════════════════════════════
  * Mock H2 Session
  *
@@ -1428,8 +1434,9 @@ UTEST(h2, goaway_shutdown) {
 }
 
 /* A graceful shutdown whose last response goes out on write readiness: once the session wants
- * neither read nor write it is done, and the connection closes there, as it does after a read. It
- * stayed open until the idle sweep or the drain deadline. */
+ * neither read nor write it is done, and the connection ends there, as it does after a read. It
+ * stayed open until the idle sweep or the drain deadline. (This connection has no drain bounds, as
+ * with reject_drain_disable, so it closes; with them it lingers: see the tests below.) */
 UTEST(h2, on_writable_closes_a_finished_session) {
     test_setup();
     MockH2Session mock;
@@ -1540,9 +1547,11 @@ UTEST(h2, idle_sweep_sends_goaway_before_closing) {
 }
 
 /* After a graceful GOAWAY a session with no stream left wants neither read nor write: it is done,
- * and the sweep closes the connection at once. It was left to the idle timeout or the drain
- * deadline, so a draining server waited out its whole deadline. */
-UTEST(h2, sweep_closes_a_finished_session) {
+ * and the sweep ends the connection at once (it was left to the idle timeout or the drain deadline,
+ * so a draining server waited out its whole deadline). It ends through the linger, not a close: the
+ * send side is half-closed (the client sees its FIN at once) and what the client still sends is
+ * discarded until its own FIN, which closes it. */
+UTEST(h2, sweep_ends_a_finished_session_through_the_linger) {
     test_setup();
     MockH2Session mock;
     mock_init(&mock);
@@ -1554,16 +1563,334 @@ UTEST(h2, sweep_closes_a_finished_session) {
     int comp = 0;
     KlHttpConn *c = h2_sweep_setup(pfd, &comp);
     ASSERT_TRUE(c != NULL);
+    ASSERT_EQ(0, kl_test_set_nonblock((KlSocketHandle)pfd[1]));
+    if (!comp)
+        ASSERT_EQ(0, kl_event_add(&h2_sweep_srv.ev.loop, (KlSocketHandle)pfd[1], KL_EVENT_READ,
+                                  &c->stream));
 
     uint64_t now = kl_monotonic_ms();
-    c->last_active_ms = now;                               /* not idle long: only "done" closes it */
+    c->last_active_ms = now;                               /* not idle long: only "done" ends it */
     kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
-    int destroyed = mock.destroy_count;
+    int st = (int)c->state, destroyed = mock.destroy_count;
+    char b[8];
+    long fin = -2, after_fin = -2;
+    int destroyed_after_fin = -1;
+    if (!comp && st == (int)KL_HTTP_CONN_DRAINING) {   /* else the peer is closed: no writes to it */
+        fin = kl_test_sockread(pfd[0], b, sizeof b);                       /* the half-close */
+        (void)kl_test_sockwrite(pfd[0], "\0\0\x08\x06\0\0\0\0\0PINGPING", 17);   /* crosses it */
+        kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, kl_monotonic_ms(), comp);
+        after_fin = (long)c->state;
+        shutdown(pfd[0], T_SHUT_WR);                       /* the client's FIN */
+        kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, kl_monotonic_ms(), comp);
+        destroyed_after_fin = mock.destroy_count;
+    }
 
     kl_http_server_free(&h2_sweep_srv);
     kl_test_closesock(pfd[0]);
     test_teardown();
-    ASSERT_EQ(destroyed, 1);                               /* was 0: held until a timeout */
+    if (comp) {                         /* not driven by the completion driver here: closed as before */
+        ASSERT_EQ(destroyed, 1);
+        return;
+    }
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);             /* was CLOSED: a close over unread input */
+    ASSERT_EQ(destroyed, 0);
+    ASSERT_EQ(fin, 0L);                                    /* the client sees the end at once */
+    ASSERT_EQ(after_fin, (long)KL_HTTP_CONN_DRAINING);     /* the PING is discarded, no reset */
+    ASSERT_EQ(destroyed_after_fin, 1);                     /* the client's FIN ends it */
+}
+
+/* ── The lingering end of a finished session, on the connection itself ────────────────────────── */
+
+/* A connection over fd with the drain's bounds, as kl_http_server_init sets them per slot. */
+static void linger_conn_init(KlHttpConn *conn, int fd, char *buf, size_t cap) {
+    memset(conn, 0, sizeof(*conn));
+    conn->stream.fd = fd;
+    conn->stream.alloc = &test_alloc;
+    conn->stream.read_buf = buf;
+    conn->stream.read_cap = cap;
+    conn->reject_drain_max_bytes = KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_BYTES;
+    conn->reject_drain_timeout_ms = KL_HTTP_SERVER_DEFAULT_REJECT_DRAIN_MS;
+    conn->answer_linger_ms = 5000;                         /* read_timeout_ms */
+}
+
+/* Read what pfd[0] holds until the end of stream (or nothing more for a moment). */
+static size_t linger_read_to_eof(int fd, char *out, size_t cap, int *eof) {
+    size_t n = 0;
+    *eof = 0;
+    while (n < cap && kl_test_poll1(fd, 0, 200) > 0) {
+        long r = kl_test_sockread(fd, out + n, cap - n);
+        if (r == 0) { *eof = 1; break; }
+        if (r < 0) break;
+        n += (size_t)r;
+    }
+    return n;
+}
+
+static void linger_session_done(MockH2Session *m) {
+    m->want_read_return = 0;                               /* GOAWAY out, no stream left */
+    m->want_write_return = 0;
+}
+
+/* The last response of a graceful shutdown goes out on write readiness and the session is done:
+ * the connection half-closes after that output and lingers (DRAINING), so the client's frames that
+ * cross the GOAWAY are read and discarded instead of turning the close into a reset that drops the
+ * output still queued. The client's FIN then ends it. */
+UTEST(h2, a_finished_session_lingers_until_the_clients_fin) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    ASSERT_EQ(0, kl_test_set_nonblock((KlSocketHandle)pfd[1]));
+    char rbuf[256];
+    KlHttpConn conn;
+    linger_conn_init(&conn, pfd[1], rbuf, sizeof rbuf);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    conn.state = KL_HTTP_CONN_HTTP2;
+
+    mock.flush_send_len = 32;                              /* the last DATA frame and the GOAWAY */
+    conn.request_body_complete = 1;                        /* left by an h2c upgrade's request */
+    linger_session_done(&mock);
+    int st = kl_http2_server_on_writable(&conn);
+    char got[128];
+    int eof = 0;
+    size_t n = linger_read_to_eof(pfd[0], got, sizeof got, &eof);
+
+    (void)kl_test_sockwrite(pfd[0], "\0\0\x08\x06\0\0\0\0\0PINGPING", 17);   /* a PING crosses */
+    (void)kl_test_sockwrite(pfd[0], "\0\0\x04\x08\0\0\0\0\0\0\0\0\x01", 13); /* a WINDOW_UPDATE */
+    kl_test_sleep_ms(20);
+    int st2 = (int)kl_http_conn_drain_step(&conn, kl_monotonic_ms());
+    uint64_t discarded = conn.drain_discarded;
+    int st_idle = (int)kl_http_conn_drain_step(&conn, kl_monotonic_ms());   /* nothing to read */
+    int destroyed = mock.destroy_count;
+    shutdown(pfd[0], T_SHUT_WR);                           /* the client's FIN */
+    kl_test_sleep_ms(20);
+    int st3 = (int)kl_http_conn_drain_step(&conn, kl_monotonic_ms());
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);             /* was CLOSED */
+    ASSERT_EQ(n, (size_t)32);                              /* the output, whole */
+    ASSERT_EQ(eof, 1);                                     /* then the FIN */
+    ASSERT_EQ(st2, (int)KL_HTTP_CONN_DRAINING);            /* the frames discarded, still open */
+    ASSERT_EQ(discarded, (uint64_t)30);
+    ASSERT_EQ(st_idle, (int)KL_HTTP_CONN_DRAINING);        /* no framing ends it: only the FIN */
+    ASSERT_EQ(destroyed, 0);
+    ASSERT_EQ(st3, (int)KL_HTTP_CONN_CLOSED);              /* the client's FIN ends it */
+}
+
+/* The same end when the session finishes after a read (the client's frame that completed it). */
+UTEST(h2, a_session_finished_by_a_read_lingers) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    char rbuf[256];
+    KlHttpConn conn;
+    linger_conn_init(&conn, pfd[1], rbuf, sizeof rbuf);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    conn.state = KL_HTTP_CONN_HTTP2;
+    int open_st = (int)kl_http2_server_feed(&conn, "x", 1);
+    linger_session_done(&mock);
+    int done_st = (int)kl_http2_server_feed(&conn, "x", 1);
+    int eof = 0;
+    char got[16];
+    (void)linger_read_to_eof(pfd[0], got, sizeof got, &eof);
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(open_st, (int)KL_HTTP_CONN_HTTP2);
+    ASSERT_EQ(done_st, (int)KL_HTTP_CONN_DRAINING);        /* was CLOSED */
+    ASSERT_EQ(eof, 1);                                     /* half-closed */
+}
+
+/* The linger is bounded both ways. Past its byte cap it reads no more (and is still not closed over
+ * the unread rest); a client that never sends its FIN (it stopped reading, or went away) is closed
+ * at the deadline, read_timeout_ms after the linger began, so the slot is not held for good. */
+UTEST(h2, a_lingering_connection_is_bounded_by_its_cap_and_deadline) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    ASSERT_EQ(0, kl_test_set_nonblock((KlSocketHandle)pfd[1]));
+    char rbuf[256];
+    KlHttpConn conn;
+    linger_conn_init(&conn, pfd[1], rbuf, sizeof rbuf);
+    conn.reject_drain_max_bytes = 16;                      /* the cap: max(this, max_body_size 0) */
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    conn.state = KL_HTTP_CONN_HTTP2;
+    linger_session_done(&mock);
+    uint64_t t0 = kl_monotonic_ms();
+    int st = kl_http2_server_on_writable(&conn);
+
+    char junk[64];
+    memset(junk, 'p', sizeof junk);
+    (void)kl_test_sockwrite(pfd[0], junk, sizeof junk);    /* more than the cap */
+    kl_test_sleep_ms(20);
+    int st_cap = (int)kl_http_conn_drain_step(&conn, kl_monotonic_ms());
+    int stopped = conn.answer_linger_stopped;
+    uint64_t discarded = conn.drain_discarded;
+    int st_more = (int)kl_http_conn_drain_step(&conn, kl_monotonic_ms());   /* reads no more */
+    uint64_t discarded_more = conn.drain_discarded;
+    uint64_t deadline = conn.drain_deadline_ms;
+    int st_before = (int)kl_http_conn_drain_step(&conn, deadline - 1);
+    int st_deadline = (int)kl_http_conn_drain_step(&conn, deadline);
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);
+    ASSERT_EQ(st_cap, (int)KL_HTTP_CONN_DRAINING);         /* past the cap: not a close over input */
+    ASSERT_EQ(stopped, 1);
+    ASSERT_EQ(discarded, (uint64_t)16);
+    ASSERT_EQ(st_more, (int)KL_HTTP_CONN_DRAINING);
+    ASSERT_EQ(discarded_more, (uint64_t)16);               /* the cap holds */
+    ASSERT_TRUE(deadline >= t0 + 5000);                    /* read_timeout_ms after it began */
+    ASSERT_TRUE(deadline <= kl_monotonic_ms() + 5000);
+    ASSERT_EQ(st_before, (int)KL_HTTP_CONN_DRAINING);
+    ASSERT_EQ(st_deadline, (int)KL_HTTP_CONN_CLOSED);      /* the abandoned client's slot comes back */
+}
+
+/* reject_drain_disable turns the linger off too (both bounds zero on the slot): a finished session
+ * closes at once, as before the linger existed. */
+UTEST(h2, a_finished_session_closes_when_the_drain_is_disabled) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    char rbuf[64];
+    KlHttpConn conn;
+    linger_conn_init(&conn, pfd[1], rbuf, sizeof rbuf);
+    conn.reject_drain_max_bytes = 0;
+    conn.reject_drain_timeout_ms = 0;
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    linger_session_done(&mock);
+    int st = kl_http2_server_on_writable(&conn);
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_CLOSED);
+}
+
+/* A TLS session that writes through to the socket and marks its close_notify, to see the order. */
+typedef struct {
+    KlTls base;
+    int shutdowns;
+} LingerTls;
+static kl_ssize_t ltls_write(KlTls *self, KlSocketHandle fd, const void *buf, size_t len) {
+    (void)self;
+    return (kl_ssize_t)kl_test_sockwrite(fd, buf, len);
+}
+static KlTlsResult ltls_handshake(KlTls *self, KlSocketHandle fd) {
+    (void)self; (void)fd; return KL_TLS_OK;
+}
+static kl_ssize_t ltls_read(KlTls *self, KlSocketHandle fd, void *buf, size_t len) {
+    (void)self; (void)fd; (void)buf; (void)len; return 0;
+}
+static size_t ltls_pending(KlTls *self) { (void)self; return 0; }
+static void ltls_reset(KlTls *self) { (void)self; }
+static void ltls_destroy(KlTls *self) { (void)self; }
+static KlTlsResult ltls_shutdown(KlTls *self, KlSocketHandle fd) {
+    ((LingerTls *)self)->shutdowns++;
+    (void)kl_test_sockwrite(fd, "<close_notify>", 14);
+    return KL_TLS_OK;
+}
+
+/* Over TLS the linger sends close_notify after the last record and before the FIN, so the client
+ * sees a clean TLS end; a FIN alone (the half-close came first) would read as a truncation. */
+UTEST(h2, a_lingering_tls_connection_sends_close_notify_before_its_fin) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    g_mock_session = &mock;
+    LingerTls tls;
+    memset(&tls, 0, sizeof tls);
+    tls.base.handshake = ltls_handshake;
+    tls.base.read      = ltls_read;
+    tls.base.write     = ltls_write;
+    tls.base.shutdown  = ltls_shutdown;
+    tls.base.pending   = ltls_pending;
+    tls.base.reset     = ltls_reset;
+    tls.base.destroy   = ltls_destroy;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    char rbuf[64];
+    KlHttpConn conn;
+    linger_conn_init(&conn, pfd[1], rbuf, sizeof rbuf);
+    conn.tls = &tls.base;
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+    conn.state = KL_HTTP_CONN_HTTP2;
+    mock.flush_send_len = 9;                               /* the GOAWAY */
+    linger_session_done(&mock);
+    int st = kl_http2_server_on_writable(&conn);
+    char got[64];
+    int eof = 0;
+    size_t n = linger_read_to_eof(pfd[0], got, sizeof got, &eof);
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);
+    ASSERT_EQ(tls.shutdowns, 1);
+    ASSERT_EQ(n, (size_t)(9 + 14));                        /* the record, then close_notify */
+    ASSERT_EQ(0, memcmp(got + 9, "<close_notify>", 14));
+    ASSERT_EQ(eof, 1);                                     /* then the FIN */
+}
+
+/* A session that becomes done outside its connection's events (the drain's GOAWAY, the settle
+ * pass's flush) must not wait for the next event to be ended: the due check reports it, so the
+ * loop's wait does not block and the sweep after it ends the connection. On a readiness loop it
+ * was ended one whole wait (about a second) late. A completion connection already closing (its
+ * receive still to retire) is not due: counting it would keep the loop from waiting at all. */
+UTEST(h2, a_session_done_outside_its_events_is_due) {
+    test_setup();
+    MockH2Session mock;
+    mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    g_mock_session = &mock;
+    int pfd[2];
+    ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    int comp = 0;
+    KlHttpConn *c = h2_sweep_setup(pfd, &comp);
+    ASSERT_TRUE(c != NULL);
+    int open_due = kl_http_server_settle_h2_due(&h2_sweep_srv);
+    linger_session_done(&mock);
+    int done_due = kl_http_server_settle_h2_due(&h2_sweep_srv);
+    c->comp_closing = 1;
+    int closing_due = kl_http_server_settle_h2_due(&h2_sweep_srv);
+    c->comp_closing = 0;
+
+    kl_http_server_free(&h2_sweep_srv);
+    kl_test_closesock(pfd[0]);
+    test_teardown();
+    ASSERT_EQ(open_due, 0);
+    ASSERT_EQ(done_due, 1);                                /* was 0: left to the next wait */
+    ASSERT_EQ(closing_due, 0);
 }
 
 /* Completion: response DATA a posted send keeps moving is activity for an HTTP/2 connection too.

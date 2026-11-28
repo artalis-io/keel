@@ -1742,6 +1742,42 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     return c->state;
 }
 
+KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c) {
+    size_t cap = c->reject_drain_max_bytes;
+    uint32_t ms = c->reject_drain_timeout_ms;
+    /* The drain disabled (reject_drain_disable zeroes both), or the fd already gone: close as
+     * before the linger existed. */
+    if (cap == 0 || ms == 0 || !kl_handle_valid(c->stream.fd)) {
+        c->state = KL_HTTP_CONN_CLOSED;
+        return c->state;
+    }
+    /* What follows on the wire is no request: no framing, no completion signal (a request's
+     * framing state left from before, an h2c upgrade's, must not end it). Only the client's FIN,
+     * the bounds and a read error end it. */
+    c->drain_unframed = 1;
+    c->drain_framing_usable = 0;
+    c->request_body_complete = 0;
+    c->reject_discard = 0;
+    size_t linger_cap = c->max_body_size > cap ? c->max_body_size : cap;
+    c->answer_linger = 1;
+    c->answer_linger_stopped = 0;
+    c->drain_budget = linger_cap;
+    c->drain_deadline_ms = kl_monotonic_ms() +
+                           (uint64_t)(c->answer_linger_ms ? c->answer_linger_ms : ms);
+    /* TLS: close_notify goes out ahead of the FIN, after the last record (best effort: a full send
+     * buffer on readiness leaves it unsent, and the client sees the FIN alone, as a close would
+     * give it). On a completion loop the engine writes it to its ring, and the caller's flush puts
+     * it on the output queue behind everything already there. */
+    if (c->tls) (void)c->tls->shutdown(c->tls, c->stream.fd);
+    if (c->comp_driven)
+        c->comp_tlsq_then_shutwr = 1;          /* once the queued output is out */
+    else
+        (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
+    c->state = KL_HTTP_CONN_DRAINING;
+    DRAIN_TRACE(c, "enter-linger");
+    return c->state;
+}
+
 /* Account bytes already received into read_buf[0..nread] and decide whether to keep draining. The
  * single place both axes share: readiness reads then calls this; the completion driver calls it from
  * the recv completion. Framing decides completion; budget and deadline only bound the effort. */

@@ -1143,6 +1143,19 @@ static int h2_session_done(const KlHttp2ServerConn *h2c) {
            !h2c->session->want_write(h2c->session);
 }
 
+/* A done session ends through the lingering half-close (kl_http_conn_begin_linger), never a close:
+ * the client's frames that cross the GOAWAY (PING, WINDOW_UPDATE, SETTINGS acknowledgements, the
+ * normal case) would be unread input at the close, and a close over unread input is a reset that
+ * drops the tail the kernel still holds of responses the server counts as sent. A done session has
+ * no stream left; any the bookkeeping still holds are released (their producers told) first, so
+ * nothing writes to the connection once it lingers. A failed session closes, as before. */
+static KlHttpConnState h2_finish_done(KlHttpConn *c) {
+    KlHttp2ServerConn *h2c = c->h2;
+    if (!h2c || !h2c->session || h2c->failed) return KL_HTTP_CONN_CLOSED;
+    h2_streams_release_all(h2c);
+    return kl_http_conn_begin_linger(c);
+}
+
 /* Transport-agnostic h2 core: feed already-received plaintext to the session (parse
  * frames + flush produced output). Shared by the readiness drive below and the
  * completion driver; see internal.h. */
@@ -1169,10 +1182,10 @@ KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len
         return KL_HTTP_CONN_CLOSED;
     }
 
-    /* Session done: close now rather than lingering until the peer times out. Flushed above, so
-     * the GOAWAY is on the wire. */
+    /* Session done: end it now rather than waiting until the peer times out. Flushed above, so
+     * the GOAWAY is on its way; the linger lets it, and everything before it, arrive. */
     if (h2_session_done(h2c))
-        return KL_HTTP_CONN_CLOSED;
+        return h2_finish_done(c);
 
     return KL_HTTP_CONN_HTTP2;
 }
@@ -1206,7 +1219,7 @@ int kl_http2_server_on_writable(KlHttpConn *c) {
 
     /* The last response of a graceful shutdown can finish here rather than after a read. */
     if (h2_session_done(h2c))
-        return KL_HTTP_CONN_CLOSED;
+        return h2_finish_done(c);
 
     return KL_HTTP_CONN_HTTP2;
 }
@@ -1264,6 +1277,12 @@ static int kl_http2_server_done_hook(const KlHttpConn *c) {
     return c->h2 && c->h2->session && (c->h2->failed || h2_session_done(c->h2));
 }
 
+/* The sweep ends a done connection: the linger (DRAINING) for a finished session, CLOSED for a
+ * failed one or with the drain disabled. */
+static KlHttpConnState kl_http2_server_finish_hook(KlHttpConn *c) {
+    return h2_finish_done(c);
+}
+
 /* Once per loop iteration, before the loop waits, on both event models (kl_http_server_settle_h2):
  * the flush of output written from outside the connection's events, the retry of a body resume
  * that failed, and the release of a failed session's streams (each producer told once, `completed`
@@ -1285,11 +1304,14 @@ static void kl_http2_server_settle_hook(KlHttpConn *c) {
 
 /* Is something for the settle hook still to do: output that became due after its pass (a producer
  * that wrote from a writable edge or a close notification), or a failed session not yet settled?
- * A resume that failed again is not: it is retried on the next pass, not in a zero-wait loop. */
+ * A resume that failed again is not: it is retried on the next pass, not in a zero-wait loop. Or
+ * is the session done, its end not yet begun (it became done outside its connection's events: the
+ * drain's GOAWAY, the settle pass's flush)? The sweep after the wait ends it (finish), which takes
+ * it out of the HTTP2 state, so this cannot keep the loop from waiting. */
 static int kl_http2_server_settle_due_hook(const KlHttpConn *c) {
     const KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session) return 0;
-    return h2c->failed ? h2c->num_streams > 0 : h2c->flush_due;
+    return h2c->failed ? h2c->num_streams > 0 : (h2c->flush_due || h2_session_done(h2c));
 }
 
 static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
@@ -1302,6 +1324,7 @@ static const KlHttp2ServerHooks kl_http2_server_hooks_table = {
     .drain_shutdown  = kl_http2_server_drain_shutdown,
     .idle            = kl_http2_server_idle_hook,
     .done            = kl_http2_server_done_hook,
+    .finish          = kl_http2_server_finish_hook,
     .settle          = kl_http2_server_settle_hook,
     .settle_due      = kl_http2_server_settle_due_hook,
 };

@@ -596,7 +596,9 @@ int kl_http_server_settle_h2_due(const KlHttpServer *s) {
     if (!h2h || !h2h->settle_due) return 0;
     for (int i = 0; i < s->pool.capacity; i++) {
         const KlHttpConn *c = &s->pool.conns[i];
-        if (c->state == KL_HTTP_CONN_HTTP2 && h2h->settle_due(c)) return 1;
+        /* A completion connection closing over a posted receive keeps its state until that
+         * receive retires: nothing is due for it, and counting it would keep the loop from waiting. */
+        if (c->state == KL_HTTP_CONN_HTTP2 && !c->comp_closing && h2h->settle_due(c)) return 1;
     }
     return 0;
 }
@@ -694,6 +696,23 @@ static const char kl_408_response[] =
     "Content-Length: 0\r\n"
     "Connection: close\r\n"
     "\r\n";
+
+/* The sweep's end of a done HTTP/2 session: the protocol's linger (h2h->finish), driven on the
+ * connection's own model as the dispatch would (readiness: READ armed; completion: the output sent,
+ * the half-close after it, a receive posted). 1 if it lingers or was closed, 0 to close it as
+ * before (a failed session, the drain disabled, a connection the completion driver does not own). */
+static int server_h2_finish(KlHttpServer *s, KlHttpConn *tc, int completion_loop) {
+    const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
+    if (!h2h || !h2h->finish || (completion_loop && !tc->comp_driven)) return 0;
+    if (h2h->finish(tc) != KL_HTTP_CONN_DRAINING) return 0;
+    if (completion_loop) {
+        kl_http_comp_linger(s, tc);
+    } else if (kl_event_mod(&s->ev.loop, tc->stream.fd, KL_EVENT_READ, &tc->stream) < 0) {
+        kl_event_del(&s->ev.loop, tc->stream.fd);
+        kl_http_server_conn_release(s, tc);
+    }
+    return 1;
+}
 
 void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int completion_loop) {
     uint64_t timeout = (uint64_t)s->config.read_timeout_ms;
@@ -795,6 +814,7 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             int done = h2h->done && h2h->done(tc);
             if (!done && !(h2h->idle && h2h->idle(tc) && now - tc->last_active_ms > timeout))
                 continue;
+            if (done && server_h2_finish(s, tc, completion_loop)) continue;
             /* An idle close says so first: a graceful GOAWAY (RFC 9113 6.8), flushed. A done
              * session sent its GOAWAY already (a no-op here). */
             if (!done && h2h->drain_shutdown) h2h->drain_shutdown(tc);

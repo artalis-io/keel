@@ -134,6 +134,22 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   client's test-on-borrow reuses an idle connection and drops one the server closed; it was a stub
   whose answer depended on a stale `errno`. On a server-accepted connection it fails (EIO). The EFI_TCP4 provider's local-address call likewise
   publishes its own failure for a bad argument.
+- **HTTP/2: a graceful drain no longer resets away the end of responses it reports as complete.**
+  Once a session was done (the drain's GOAWAY out and no stream left, or a client's GOAWAY, or a
+  protocol-error GOAWAY), the connection was closed at once. HTTP/2 clients send frames while they
+  receive (PING, WINDOW_UPDATE, SETTINGS acknowledgements), so the close was usually over unread
+  input, which makes it a TCP reset: the tail still in the server's send queue was discarded and the
+  client's receive failed, while `kl_http_response_stream_on_close` had reported `completed` 1.
+  Seen on every backend. A done session now ends as an HTTP/1.1 connection does after a rejected
+  request: once its output is out it sends close_notify (TLS) and half-closes, then reads and
+  discards what the client still sends until the client's FIN, past `max(reject_drain_max_bytes,
+  max_body_size)` only the hang-up, or `read_timeout_ms`; `reject_drain_disable` turns this off. A
+  client that never closes holds the slot (and a draining server) for up to `read_timeout_ms`, or
+  the drain deadline, whichever comes first.
+- **HTTP/2 on readiness loops: a session done outside its connection's events closed a second
+  late.** A session that finished in the drain's GOAWAY flush or the settle pass was left until the
+  next wait timed out (about one second), so every drain of a server with an HTTP/2 connection took
+  that much longer. Completion loops already ended it at once; readiness loops now do too.
 
 ## [3.6.0]
 
