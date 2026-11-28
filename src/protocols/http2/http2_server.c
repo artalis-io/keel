@@ -669,8 +669,9 @@ static int h2_cb_on_request(void *ud, uint32_t stream_id,
             for (size_t j = 0; j < hdr_value_lens[i]; j++) {
                 char ch = req->headers[hdr_count].value[j];
                 if (ch < '0' || ch > '9') { cl_valid = 0; break; }
-                if (content_length > SIZE_MAX / 10) { cl_valid = 0; break; }
-                content_length = content_length * 10 + (size_t)(ch - '0');
+                size_t d = (size_t)(ch - '0');
+                if (content_length > (SIZE_MAX - d) / 10) { cl_valid = 0; break; }
+                content_length = content_length * 10 + d;
             }
             if (!cl_valid) {
                 h2_stream_destroy(h2c, stream);

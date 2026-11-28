@@ -7,6 +7,8 @@
 #include <keel/http_connection.h>
 #include <keel/http_router.h>
 #include <keel/http_body_reader.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include "net_compat.h"
@@ -854,6 +856,50 @@ UTEST(h2, data_for_a_finished_stream_is_ignored) {
     test_teardown();
     ASSERT_EQ(rd, 0);
     ASSERT_EQ(re, 0);
+}
+
+/* content-length is accumulated in a size_t: SIZE_MAX itself is a valid value, one more is not. The
+ * last digit of SIZE_MAX is 5 (4294967295, 18446744073709551615), so SIZE_MAX + 1 is the same
+ * digits ending in 6: a guard that only checks the running value against SIZE_MAX / 10 lets that
+ * final `* 10 + 6` wrap to 0 and the stream would be accepted as having no body. */
+UTEST(h2, content_length_one_past_size_max_is_rejected) {
+    test_setup();
+    MockH2Session mock; mock_init(&mock); g_mock_session = &mock;
+    int pfd[2]; ASSERT_EQ(kl_test_socketpair(pfd), 0);
+    KlHttpConn conn; memset(&conn, 0, sizeof(conn));
+    conn.stream.fd = pfd[1]; conn.stream.alloc = &test_alloc;
+    kl_http_router_add(&test_router, "POST", "/data", test_handler, NULL, test_br_factory);
+    kl_http2_server_upgrade(&conn, &test_router, &test_h2_cfg, NULL, 0);
+
+    char max_s[32], over_s[32];
+    int n = snprintf(max_s, sizeof max_s, "%zu", (size_t)SIZE_MAX);
+    ASSERT_TRUE(n > 1 && max_s[n - 1] == '5');
+    memcpy(over_s, max_s, (size_t)n + 1);
+    over_s[n - 1] = '6';                          /* SIZE_MAX + 1 */
+
+    const char *hn[] = {"content-length"};
+    size_t hnl[] = {14};
+    const char *hv_max[] = {max_s};
+    size_t hvl[] = {(size_t)n};
+    int rc_max = mock.callbacks.on_request(mock.cb_user_data, 1, "POST", 4, "/data", 5,
+                                           NULL, 0, hn, hv_max, hnl, hvl, 1);
+    int streams_after_max = conn.h2->num_streams;
+    size_t cl_max = streams_after_max == 1 ? conn.h2->streams[0].req.content_length : 0;
+
+    const char *hv_over[] = {over_s};
+    int rc_over = mock.callbacks.on_request(mock.cb_user_data, 3, "POST", 4, "/data", 5,
+                                            NULL, 0, hn, hv_over, hnl, hvl, 1);
+    int streams_after_over = conn.h2->num_streams;
+
+    kl_http2_server_cleanup(&conn);
+    kl_test_closesock(pfd[0]);
+    kl_test_closesock(pfd[1]);
+    test_teardown();
+    ASSERT_EQ(rc_max, 0);
+    ASSERT_EQ(streams_after_max, 1);
+    ASSERT_TRUE(cl_max == (size_t)SIZE_MAX);
+    ASSERT_EQ(rc_over, -1);
+    ASSERT_EQ(streams_after_over, 1);
 }
 
 /* A stream whose body passes max_body_size is answered 413 on that stream, and the call succeeds:

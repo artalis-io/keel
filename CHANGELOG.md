@@ -92,6 +92,12 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   final flush. It advanced that NULL pointer by zero and handed it to `tinfl_decompress`, which C
   leaves undefined (clang's UBSan aborts on it). It now starts from an empty buffer instead. The
   miniz regression tests in CI are built with clang so its sanitizer checks this.
+- **HTTP/2: a `content-length` one past `SIZE_MAX` no longer reads as a small number.** The overflow
+  guard checked the running value against `SIZE_MAX / 10`, which still let the last `* 10 + digit`
+  wrap: `18446744073709551616` (on 64-bit; `4294967296` on 32-bit) was taken as 0 and the stream as
+  having no body. Such a value is now rejected like any other malformed `content-length`. nghttp2
+  still checks the DATA received against the header, so framing was not affected; the request's
+  `content_length` and the body reader chosen for it were.
 
 ## [3.6.0]
 
