@@ -213,7 +213,8 @@ jobs:
         with:
           msystem: MINGW64
           release: false
-          install: mingw-w64-x86_64-gcc make mingw-w64-x86_64-pkgconf
+          # openssl + nghttp2: the real-TLS drain e2e below (BYO libraries, MINGW64 builds).
+          install: mingw-w64-x86_64-gcc make mingw-w64-x86_64-pkgconf mingw-w64-x86_64-openssl mingw-w64-x86_64-nghttp2
 
       # Winsock select() event backend + Winsock provider. Builds and links the entire
       # library on Windows; TCP HTTP server + sync/async client, the UDP
@@ -259,6 +260,17 @@ jobs:
         # longer tests, so 5 minutes no longer left room. Same budget as the IOCP suite step.
         timeout-minutes: 15
         run: make OS=windows CC=gcc test-win
+
+      # Real TLS (the OpenSSL adapter, an OpenSSL client) over the Winsock select() loop: HTTP/2 and
+      # HTTP/1.1 ends that must deliver every byte and then a clean TLS shutdown, a peer that sends
+      # close_notify and its FIN while its answer is still queued, and a peer that stops cooperating
+      # (never reads, never closes) ended by the linger deadline, the drain deadline and a second
+      # stop. integrations/http2/nghttp2/tests/e2e_h2_drain_linger.c, the e2e-tls target.
+      - name: Real-TLS drain e2e (OpenSSL + nghttp2, Winsock select)
+        timeout-minutes: 5
+        run: |
+          make OS=windows CC=gcc
+          make -C integrations/http2/nghttp2 OS=windows CC=gcc NGHTTP2_DIR=/mingw64 OPENSSL_DIR=/mingw64 e2e-tls
 
   windows-msvc:
     name: Windows (native MSVC, cl.exe)
@@ -340,7 +352,8 @@ jobs:
         with:
           msystem: MINGW64
           release: false
-          install: mingw-w64-x86_64-gcc make
+          # openssl + nghttp2: the real-TLS drain e2e below (BYO libraries, MINGW64 builds).
+          install: mingw-w64-x86_64-gcc make mingw-w64-x86_64-openssl mingw-w64-x86_64-nghttp2
 
       # IOCP completion backend (BACKEND=iocp) on a real Windows runner. This job
       # provides native runtime coverage: it links the whole library with event_iocp.c
@@ -369,6 +382,15 @@ jobs:
       - name: End-to-end TLS-over-IOCP roundtrip smoke test (mock TLS)
         timeout-minutes: 3
         run: make OS=windows BACKEND=iocp CC=gcc smoke-iocp-tls
+
+      # The same real-TLS drain e2e as the Winsock job, over the IOCP loop (libkeel built with
+      # BACKEND=iocp): every byte then a clean TLS shutdown, a peer shutdown over queued output, and
+      # bounded ends for a peer that stops cooperating.
+      - name: Real-TLS drain e2e (OpenSSL + nghttp2, IOCP)
+        timeout-minutes: 5
+        run: |
+          make OS=windows BACKEND=iocp CC=gcc
+          make -C integrations/http2/nghttp2 OS=windows CC=gcc NGHTTP2_DIR=/mingw64 OPENSSL_DIR=/mingw64 e2e-tls
 
       # The IOCP watcher relay (overlapped WSARecv on the thread-pool wakeup socket surfaces
       # KL_COMP_WATCHER); async/thread-pool handlers over the completion loop (8e-2c).

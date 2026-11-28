@@ -20,8 +20,12 @@
  *     the GOAWAY fit the socket buffers, so the session is done and the connection lingers: it must
  *     still end at the linger deadline (read_timeout_ms), so the run returns then, well before the
  *     drain deadline, with no connection left.
- * With -DE2E_TLS (and the OpenSSL adapter linked) the chatty case also runs over real TLS (ALPN h2,
- * an OpenSSL client): the bytes must arrive whole, then the server's close_notify, then the FIN.
+ * With -DE2E_TLS (and the OpenSSL adapter linked), over real TLS (an OpenSSL client):
+ *   chatty (TLS): as above over ALPN h2; the bytes, then the server's close_notify, then the FIN;
+ *   forced (TLS): the drain deadline and a second stop end a lingering client that never reads;
+ *   HTTP/1.1 rejection: a 413, then close_notify, then the FIN;
+ *   peer shutdown: the client sends close_notify and its FIN while its answer is still queued in
+ *     the server, and still gets every byte, then the server's close_notify.
  * Exits non-zero on any failure.
  */
 #include <keel/keel.h>
@@ -75,6 +79,7 @@ static int cli_interrupted(void) { return errno == EINTR; }   /* a signal, not t
 #define CHUNK          16384
 #define STOP_AT        (512u * 1024u)        /* the client asks for the stop once this arrived */
 #define NSTREAMS       3
+#define H1_BIG         (900u * 1024u)        /* the peer-shutdown case's body */
 
 static int fail(const char *m) { fprintf(stderr, "FAIL: %s\n", m); return 1; }
 static void nap(int ms) {
@@ -634,6 +639,75 @@ static int case_h1_reject_tls(KlTlsConfig *tlscfg) {
     return 0;
 }
 
+/* A peer shutdown while the server's encrypted output is still queued: the client asks for a large
+ * body, stops reading for a moment (its small receive buffer fills, the rest waits in the server's
+ * send queue), sends its close_notify and its FIN, and only then reads. Every byte must still
+ * arrive, then the server's own close_notify (a clean TLS end), then the end of stream. */
+static void h1_big_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_http_response_status(res, 200);
+    kl_http_response_body_borrow(res, (const char *)g_bigbuf, H1_BIG);
+}
+static int case_h1_peer_shutdown_tls(KlTlsConfig *tlscfg) {
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .tls = tlscfg,
+                               .read_timeout_ms = 10000 };
+    atomic_store(&g_run_returned, 0);
+    if (kl_http_server_init(&g_srv, &cfg) < 0) return fail("server init");
+    kl_http_server_route(&g_srv, "GET", "/big", h1_big_handler, NULL, NULL);
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) {
+        kl_http_server_free(&g_srv);
+        return fail("server thread");
+    }
+    pthread_detach(tid);
+    for (int i = 0; i < 400 && kl_http_server_bound_port(&g_srv) <= 0; i++) nap(5);
+    Cli c;
+    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), 1) < 0) return fail_srv("client connect", &c);
+    static const char req[] = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n";
+    int ok = cli_send_cb(NULL, (const uint8_t *)req, sizeof req - 1, 0, &c) > 0;
+    nap(300);                              /* the answer queues behind a full receive buffer */
+    int sd = SSL_shutdown(c.ssl);          /* the client's close_notify (0: the server's pending) */
+#if defined(_WIN32)
+    shutdown(c.fd, SD_SEND);
+#else
+    shutdown(c.fd, SHUT_WR);               /* and its FIN */
+#endif
+    static unsigned char got[H1_BIG + 4096];
+    size_t n = 0;
+    int clean = 0, intr = 0;
+    while (ok && n < sizeof got) {
+        int rr = SSL_read(c.ssl, got + n, (int)(sizeof got - n));
+        if (rr > 0) { n += (size_t)rr; continue; }
+        int e = SSL_get_error(c.ssl, rr);
+        if (e == SSL_ERROR_WANT_READ && cli_interrupted() && ++intr < 100) continue;
+        clean = e == SSL_ERROR_ZERO_RETURN;
+        break;
+    }
+    /* The head, then the body byte for byte. */
+    size_t body_at = 0, body = 0;
+    int bad = 0;
+    for (size_t i = 0; i + 3 < n; i++)
+        if (memcmp(got + i, "\r\n\r\n", 4) == 0) { body_at = i + 4; break; }
+    if (body_at) {
+        body = n - body_at;
+        for (size_t i = 0; i < body && i < H1_BIG; i++)
+            if (got[body_at + i] != pattern(2, i)) { bad = 1; break; }
+    }
+    int head_ok = n >= 12 && memcmp(got, "HTTP/1.1 200", 12) == 0;
+    cli_free(&c);
+    kl_http_server_stop(&g_srv);
+    int returned = srv_wait_return(10000) == 0;
+    if (returned) kl_http_server_free(&g_srv);
+    printf("  peer shutdown (TLS): SSL_shutdown %d; head %d, body %zu/%u bad %d; then close_notify %d\n",
+           sd, head_ok, body, (unsigned)H1_BIG, bad, clean);
+    if (!head_ok || body != H1_BIG || bad)
+        return fail("queued output was lost to the client's shutdown");
+    if (!clean) return fail("no clean TLS end after the client's shutdown");
+    if (!returned) return fail("the run did not return");
+    printf("HTTP/1.1 over TLS: a peer shutdown keeps every queued byte OK\n");
+    return 0;
+}
+
 static int case_chatty_tls(void) {
     static KlAllocator alloc;
     alloc = kl_allocator_default();
@@ -675,6 +749,9 @@ int main(void) {
     tc = tls_config();
     if (!tc) failed += fail("TLS context");
     else failed += case_h1_reject_tls(tc);
+    tc = tls_config();
+    if (!tc) failed += fail("TLS context");
+    else failed += case_h1_peer_shutdown_tls(tc);
 #endif
     free(g_bigbuf);
     if (failed) { fprintf(stderr, "FAIL: %d case(s)\n", failed); return 1; }
