@@ -149,6 +149,16 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   that linger (or after a rejected request's answer) no longer cancels output still queued for it
   (the end of the answer, the server's own close_notify): it closes once that output is out, as for
   the client's FIN.
+- **HTTP/2: the idle timeout's close is graceful too.** An idle connection the sweep timed out got
+  its GOAWAY and was closed at once, so a client frame crossing the GOAWAY reset it away. It now
+  ends through the same linger. A client that never closes holds the slot up to `read_timeout_ms`
+  more.
+- **TLS: a drain's close_notify reaches the client.** After a rejected request (a 413, 431, 408),
+  HTTP/1.1 half-closed the connection before the TLS shutdown, so close_notify was written to a shut
+  socket and the client saw its answer end in a truncation. Every drain, HTTP/1.1 and HTTP/2 alike,
+  now sends close_notify after the last record and only then half-closes; on a readiness loop a
+  full send buffer delays the half-close until close_notify is out (bounded by the drain's
+  deadline). It is not sent a second time at release.
 - **HTTP/2 on readiness loops: a session done outside its connection's events closed a second
   late.** A session that finished in the drain's GOAWAY flush or the settle pass was left until the
   next wait timed out (about one second), so every drain of a server with an HTTP/2 connection took

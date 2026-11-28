@@ -440,6 +440,35 @@ static int case_abandoned(void) {
     return 0;
 }
 
+/* A forced end must not wait for a lingering client that never reads or closes (over TLS: never
+ * completes the TLS shutdown either): the drain deadline (mode 0) or a second stop (mode 1) ends the
+ * run, and kl_http_server_free then releases the lingering connection. Delivery is not promised. */
+static int case_forced(int tls, KlTlsConfig *tlscfg, int mode) {
+    const char *name = mode ? "second stop" : "drain deadline";
+    KlHttp2ServerConfig h2cfg = { .factory = kl_http2_nghttp2_server_session };
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .h2 = &h2cfg, .tls = tlscfg,
+                               .drain_timeout_ms = mode ? 20000 : 1000, .read_timeout_ms = 20000 };
+    if (srv_start(&cfg) < 0) return fail("server start");
+    Cli c;
+    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), tls) < 0) return fail("client connect");
+    if (cli_get(&c, "/small", 2, 16384) < 0 || nghttp2_session_send(c.ng) != 0) return fail("submit");
+    nap(300);                              /* answered; nobody reads it */
+    uint64_t t_stop = now_ms();
+    kl_http_server_stop(&g_srv);
+    if (mode) { nap(500); t_stop = now_ms(); kl_http_server_stop(&g_srv); }
+    int returned = srv_wait_return(15000) == 0;
+    uint64_t took = returned ? atomic_load(&g_run_return_ms) - t_stop : 0;
+    kl_http_server_free(&g_srv);           /* releases the lingering connection */
+    cli_free(&c);
+    printf("  forced (%s%s): run returned %d, %llu ms after the %s\n", name, tls ? ", TLS" : "",
+           returned, (unsigned long long)took, mode ? "second stop" : "stop");
+    if (!returned) return fail("a lingering client held the run past a forced end");
+    if (mode ? took > 1500 : (took < 800 || took > 3000))
+        return fail("the forced end did not come when it should");
+    printf("nghttp2 forced end (%s%s) OK\n", name, tls ? ", TLS" : "");
+    return 0;
+}
+
 #ifdef E2E_TLS
 /* Embedded self-signed EC cert, CN=127.0.0.1 (the test material of alpn_server.c). */
 static const char CERT_PEM[] =
@@ -460,6 +489,65 @@ static const char KEY_PEM[] =
 "gSicJ0RHBVOrlx0ISej/z1cGczKhRANCAAQaZEdp4OpJZgbYIuvQiCDZE86uRuj+\n"
 "HQSP88xCcQ17ZSg3dWoDMRGHDXznyJNlQ0vtbNr9Wcg4+/DAC/SLNu7I\n"
 "-----END PRIVATE KEY-----\n";
+
+static KlTlsConfig g_tls;
+static KlAllocator g_tls_alloc;
+static KlTlsConfig *tls_config(void) {
+    g_tls_alloc = kl_allocator_default();
+    KlTlsCtx *ctx = kl_tls_openssl_ctx_create_from_buf(
+        (const unsigned char *)CERT_PEM, sizeof CERT_PEM - 1,
+        (const unsigned char *)KEY_PEM, sizeof KEY_PEM - 1, NULL, 0, KL_MTLS_NONE, &g_tls_alloc);
+    if (!ctx) return NULL;
+    const char *protos[] = { "h2", NULL };
+    if (kl_tls_openssl_ctx_set_alpn(ctx, protos) != 0) { kl_tls_openssl_ctx_destroy(ctx); return NULL; }
+    g_tls = (KlTlsConfig){ .ctx = ctx, .factory = kl_tls_openssl_create,
+                           .ctx_destroy = kl_tls_openssl_ctx_destroy };
+    return &g_tls;
+}
+
+/* HTTP/1.1 over the same real TLS ends the same way: a request rejected before its body (a 413) gets
+ * its answer, then close_notify (a clean TLS end), then the FIN, while its body is discarded. */
+static void h1_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_http_response_body_copy(res, "unreached", 9);
+}
+static int case_h1_reject_tls(KlTlsConfig *tlscfg) {
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .tls = tlscfg,
+                               .max_body_size = 1024, .read_timeout_ms = 5000 };
+    atomic_store(&g_run_returned, 0);
+    if (kl_http_server_init(&g_srv, &cfg) < 0) return fail("server init");
+    kl_http_server_route(&g_srv, "POST", "/up", h1_handler, NULL, NULL);
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, srv_thread, NULL) != 0) return fail("server thread");
+    pthread_detach(tid);
+    for (int i = 0; i < 400 && kl_http_server_bound_port(&g_srv) <= 0; i++) nap(5);
+    Cli c;
+    if (cli_connect(&c, kl_http_server_bound_port(&g_srv), 1) < 0) return fail("client connect");
+    static const char head[] = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n";
+    char body[8192];
+    memset(body, 'b', sizeof body);
+    int ok = SSL_write(c.ssl, head, (int)sizeof head - 1) > 0 && SSL_write(c.ssl, body, (int)sizeof body) > 0;
+    char got[4096];
+    size_t n = 0;
+    int clean = 0;
+    while (ok && n < sizeof got) {
+        int rr = SSL_read(c.ssl, got + n, (int)(sizeof got - n));
+        if (rr > 0) { n += (size_t)rr; continue; }
+        clean = SSL_get_error(c.ssl, rr) == SSL_ERROR_ZERO_RETURN;   /* close_notify */
+        break;
+    }
+    int answered = n >= 12 && memcmp(got, "HTTP/1.1 413", 12) == 0;
+    cli_free(&c);
+    kl_http_server_stop(&g_srv);
+    int returned = srv_wait_return(10000) == 0;
+    kl_http_server_free(&g_srv);
+    printf("  HTTP/1.1 rejection (TLS): answered 413 %d, then close_notify %d\n", answered, clean);
+    if (!answered) return fail("the 413 did not arrive");
+    if (!clean) return fail("no close_notify after the 413 (the half-close came first)");
+    if (!returned) return fail("the run did not return");
+    printf("HTTP/1.1 rejection over TLS: answer, close_notify, FIN OK\n");
+    return 0;
+}
 
 static int case_chatty_tls(void) {
     static KlAllocator alloc;
@@ -489,6 +577,19 @@ int main(void) {
     failed += case_abandoned();
 #ifdef E2E_TLS
     failed += case_chatty_tls();
+#endif
+    failed += case_forced(0, NULL, 0);
+    failed += case_forced(0, NULL, 1);
+#ifdef E2E_TLS
+    KlTlsConfig *tc = tls_config();
+    if (!tc) failed += fail("TLS context");
+    else failed += case_forced(1, tc, 0);
+    tc = tls_config();
+    if (!tc) failed += fail("TLS context");
+    else failed += case_forced(1, tc, 1);
+    tc = tls_config();
+    if (!tc) failed += fail("TLS context");
+    else failed += case_h1_reject_tls(tc);
 #endif
     free(g_bigbuf);
     if (failed) { fprintf(stderr, "FAIL: %d case(s)\n", failed); return 1; }

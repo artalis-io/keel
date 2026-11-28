@@ -160,7 +160,9 @@ struct KlHttpConn {
     KlHttp1ChunkedDecoder chunked_dec;
 
     KlTls *tls;
-    int tls_shutdown_sent;      /* close_notify already sent (the linger, before its half-close) */
+    int tls_shutdown_sent;      /* close_notify already sent (a drain, before its half-close) */
+    int tls_shutdown_pending;   /* readiness: close_notify refused by a full socket; the half-close
+                                 * waits for it (kl_http_conn_drain_on_writable) */
     int tls_want;               /* KL_EVENT_READ or KL_EVENT_WRITE during handshake */
     char *comp_cipher;          /* Completion-mode TLS ciphertext scratch (driver-owned) */
     size_t comp_cipher_cap;
@@ -345,6 +347,15 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c);
  * the caller puts the queued output (and a TLS engine's) on its way and keeps a receive posted
  * (kl_http_comp_linger). */
 KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c);
+
+/* Readiness, DRAINING: the socket is writable. A close_notify the full socket refused when the drain
+ * began is sent now, and the half-close follows it. Returns the state (DRAINING). */
+KlHttpConnState kl_http_conn_drain_on_writable(KlHttpConn *c);
+
+/* Readiness, DRAINING: the interest to register. READ while it reads; past the linger's cap the
+ * hang-up only (`can_hangup`: the loop has KL_EVENT_CAP_HANGUP) or nothing; WRITE as well while a
+ * close_notify is still to go out. */
+KlEventMask kl_http_conn_drain_interest(const KlHttpConn *c, int can_hangup);
 
 /* One bounded, non-blocking drain read. Returns DRAINING to stay, or CLOSED on body consumed,
  * peer EOF, budget exhaustion, deadline expiry or socket error. */

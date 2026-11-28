@@ -159,11 +159,15 @@ typedef struct KlHttpServerConfig {
      * Windows select()) wait for the deadline. It closes after read_timeout_ms at the latest (a close over unread input is a reset
      * that would drop the answer still queued in the kernel).
      *
+     * Over TLS every drain sends close_notify after the last record and before the half-close
+     * (on readiness, once a full socket takes it), so the client sees a clean TLS end.
+     *
      * An HTTP/2 connection whose session is done (its GOAWAY out and no stream left: a graceful
-     * drain, the client's GOAWAY, a protocol error) ends the same way, with the same bounds: once
-     * its output is out it sends close_notify (TLS) and half-closes, then discards what the client
-     * still sends (PING, WINDOW_UPDATE) until the client's FIN, past the cap the hang-up, or
-     * read_timeout_ms. reject_drain_disable makes it close at once instead.
+     * drain, the client's GOAWAY, a protocol error), or that the idle timeout ends after its GOAWAY,
+     * ends the same way, with the same bounds: once its output is out it sends close_notify (TLS)
+     * and half-closes, then discards what the client still sends (PING, WINDOW_UPDATE) until the
+     * client's FIN, past the cap the hang-up, or read_timeout_ms. reject_drain_disable makes it
+     * close at once instead.
      *
      * Full contract, including why the byte-cap regression test deliberately does not assert
      * delivery: docs/contracts/early_rejection_drain.md */

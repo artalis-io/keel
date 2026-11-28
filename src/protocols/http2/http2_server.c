@@ -1277,8 +1277,8 @@ static int kl_http2_server_done_hook(const KlHttpConn *c) {
     return c->h2 && c->h2->session && (c->h2->failed || h2_session_done(c->h2));
 }
 
-/* The sweep ends a done connection: the linger (DRAINING) for a finished session, CLOSED for a
- * failed one or with the drain disabled. */
+/* The sweep ends a connection gracefully (its session done, or idle past its timeout after the
+ * GOAWAY): the linger (DRAINING), or CLOSED for a failed session or with the drain disabled. */
 static KlHttpConnState kl_http2_server_finish_hook(KlHttpConn *c) {
     return h2_finish_done(c);
 }

@@ -102,6 +102,8 @@ typedef struct {
     /* A live connection's output: once recv sees done_marker, flush writes out_total bytes of a
      * pattern through KEEL's send callback (as much as it takes each time), and the session is done
      * (wants neither read nor write) once all of it went. live_out[i] is the i-th session's total. */
+    size_t goaway_len;                /* shutdown queues a GOAWAY of this size, sent by the next flush */
+    int goaway_pending;
     const char *done_marker;
     size_t live_out[4];
     int sessions;
@@ -172,7 +174,7 @@ static int mock_submit_response(KlHttp2ServerSession *self, uint32_t stream_id,
 static int mock_want_write(KlHttp2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->want_write_count++;
-    return m->want_write_return || m->out_sent < m->out_total;
+    return m->want_write_return || m->out_sent < m->out_total || m->goaway_pending;
 }
 
 static int mock_flush(KlHttp2ServerSession *self) {
@@ -192,6 +194,11 @@ static int mock_flush(KlHttp2ServerSession *self) {
             m->closes_reported++;
             m->callbacks.on_stream_reset(m->cb_user_data, ids[i], 0);
         }
+    }
+    if (m->goaway_pending) {
+        static const char goaway[64] = {0};
+        size_t n = m->goaway_len < sizeof goaway ? m->goaway_len : sizeof goaway;
+        if (m->callbacks.send(m->cb_user_data, goaway, n) == (kl_ssize_t)n) m->goaway_pending = 0;
     }
     while (m->out_sent < m->out_total) {
         unsigned char chunk[4096];
@@ -215,6 +222,7 @@ static int mock_want_read(KlHttp2ServerSession *self) {
 static int mock_shutdown(KlHttp2ServerSession *self) {
     MockH2Session *m = (MockH2Session *)self;
     m->shutdown_count++;
+    if (m->goaway_len) m->goaway_pending = 1;
     return m->shutdown_return;
 }
 
@@ -1564,29 +1572,59 @@ static KlHttpConn *h2_sweep_setup(int pfd[2], int *completion_loop) {
     return c;
 }
 
-/* An idle HTTP/2 connection the sweep closes is sent a GOAWAY first (RFC 9113 6.8), so the client
- * knows no request it sent was processed rather than seeing the connection simply drop. */
-UTEST(h2, idle_sweep_sends_goaway_before_closing) {
+static size_t linger_read_to_eof(int fd, char *out, size_t cap, int *eof);
+
+/* An idle HTTP/2 connection the sweep times out is sent a GOAWAY first (RFC 9113 6.8), so the client
+ * knows no request it sent was processed rather than seeing the connection simply drop. And it ends
+ * gracefully, as a finished session does: the half-close after the GOAWAY, then the linger, so a
+ * client frame that crosses the GOAWAY does not turn the close into a reset that drops it. */
+UTEST(h2, idle_sweep_sends_goaway_then_lingers) {
     test_setup();
     MockH2Session mock;
     mock_init(&mock);
+    mock.with_want_read = 1;
+    mock.want_read_return = 1;
+    mock.goaway_len = 17;                                  /* the GOAWAY frame */
     g_mock_session = &mock;
     int pfd[2];
     ASSERT_EQ(kl_test_socketpair(pfd), 0);
     int comp = 0;
     KlHttpConn *c = h2_sweep_setup(pfd, &comp);
     ASSERT_TRUE(c != NULL);
-
+    ASSERT_EQ(0, kl_test_set_nonblock((KlSocketHandle)pfd[1]));
+    if (!comp)
+        ASSERT_EQ(0, kl_event_add(&h2_sweep_srv.ev.loop, (KlSocketHandle)pfd[1], KL_EVENT_READ,
+                                  &c->stream));
     uint64_t now = kl_monotonic_ms();
     c->last_active_ms = now - 1000;                        /* idle past read_timeout_ms */
     kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
-    int shutdowns = mock.shutdown_count, destroyed = mock.destroy_count;
+    int shutdowns = mock.shutdown_count, destroyed = mock.destroy_count, st = (int)c->state;
+    char got[64];
+    int eof = 0;
+    size_t n = 0;
+    int destroyed_after_fin = -1;
+    if (!comp && st == (int)KL_HTTP_CONN_DRAINING) {
+        n = linger_read_to_eof(pfd[0], got, sizeof got, &eof);
+        (void)kl_test_sockwrite(pfd[0], "\0\0\x08\x06\0\0\0\0\0PINGPING", 17);   /* crosses it */
+        kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, kl_monotonic_ms(), comp);
+        shutdown(pfd[0], T_SHUT_WR);                       /* the client's FIN */
+        kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, kl_monotonic_ms(), comp);
+        destroyed_after_fin = mock.destroy_count;
+    }
 
     kl_http_server_free(&h2_sweep_srv);
     kl_test_closesock(pfd[0]);
     test_teardown();
-    ASSERT_EQ(destroyed, 1);                               /* closed */
-    ASSERT_EQ(shutdowns, 1);                               /* was 0: closed without a GOAWAY */
+    ASSERT_EQ(shutdowns, 1);                               /* the GOAWAY first */
+    if (comp) {                         /* not completion-driven here: closed as before */
+        ASSERT_EQ(destroyed, 1);
+        return;
+    }
+    ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);             /* was CLOSED: an abortive close */
+    ASSERT_EQ(destroyed, 0);
+    ASSERT_EQ(n, (size_t)17);                              /* the GOAWAY, whole */
+    ASSERT_EQ(eof, 1);                                     /* then the FIN */
+    ASSERT_EQ(destroyed_after_fin, 1);                     /* the client's FIN ends it */
 }
 
 /* After a graceful GOAWAY a session with no stream left wants neither read nor write: it is done,
@@ -2795,7 +2833,9 @@ UTEST(h2, prior_knowledge_preface_reaches_the_session_whole) {
  *      client's FIN then closes it at once.
  *   B: the session finishes inside a send (its output is past the queue's producer bound, so it
  *      finishes from a send completion and the sweep ends it): every byte, then the FIN; the client
- *      never closes, and the linger's deadline (read_timeout_ms) closes it. */
+ *      never closes, and the linger's deadline (read_timeout_ms) closes it.
+ *   C: an idle connection times out: its GOAWAY, then the FIN; a frame after it is discarded; the
+ *      client's FIN closes it. */
 static KlHttpServer g_lg_srv;
 static MockH2Session g_lg_mock;
 static void lg_server_thread(void *arg) { (void)arg; kl_http_server_run(&g_lg_srv); }
@@ -2851,6 +2891,7 @@ UTEST(h2, a_done_session_lingers_on_the_servers_loop) {
     g_lg_mock.done_marker = "DONE!";
     g_lg_mock.live_out[0] = 256u * 1024u;                  /* within the completion queue's bound */
     g_lg_mock.live_out[1] = 3u * 1024u * 1024u;            /* past it */
+    g_lg_mock.goaway_len = 17;                             /* C's idle-timeout GOAWAY */
     g_mock_session = &g_lg_mock;
     kl_atomic_store_int(&g_mock_destroys, 0);
     KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .h2 = &test_h2_cfg,
@@ -2880,6 +2921,36 @@ UTEST(h2, a_done_session_lingers_on_the_servers_loop) {
     long deadline_close_ms = lg_wait_destroys(2, 5000);
     if (fd >= 0) kl_test_closesock(fd);
 
+    /* C: idle past read_timeout_ms: the GOAWAY, the FIN, a crossing frame discarded, the client's FIN. */
+    int eof_c = 0;
+    size_t got_c = 0;
+    int lingering_c = 0;
+    long idle_fin_close_ms = -1;
+    fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof addr);
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons((uint16_t)g_lg_srv.bound_port);
+        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+        if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0) {
+            (void)kl_test_sockwrite(fd, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24);
+            char gb[64];
+            while (kl_test_poll1(fd, 0, 4000) > 0) {       /* the idle timeout's GOAWAY, then EOF */
+                long r = kl_test_sockread(fd, gb, sizeof gb);
+                if (r == 0) { eof_c = 1; break; }
+                if (r < 0) { eof_c = -1; break; }
+                got_c += (size_t)r;
+            }
+            (void)kl_test_sockwrite(fd, "\0\0\x08\x06\0\0\0\0\0PINGPING", 17);
+            kl_test_sleep_ms(200);
+            lingering_c = kl_atomic_load_int(&g_mock_destroys) == 2;
+            shutdown(fd, T_SHUT_WR);
+            idle_fin_close_ms = lg_wait_destroys(3, 3000);
+        }
+        if (fd >= 0) kl_test_closesock(fd);
+    }
+
     kl_http_server_stop(&g_lg_srv);
     kl_plat_thread_join(&t);
     kl_http_server_free(&g_lg_srv);
@@ -2895,6 +2966,10 @@ UTEST(h2, a_done_session_lingers_on_the_servers_loop) {
     ASSERT_TRUE(lingering_b);
     ASSERT_TRUE(deadline_close_ms >= 700);                 /* held to its deadline (1500 ms) ... */
     ASSERT_TRUE(deadline_close_ms >= 0 && deadline_close_ms < 4000);   /* ... and closed by it */
+    ASSERT_EQ(got_c, (size_t)17);                          /* the GOAWAY */
+    ASSERT_EQ(eof_c, 1);                                   /* then the FIN, not a reset */
+    ASSERT_TRUE(lingering_c);                              /* was closed at once */
+    ASSERT_TRUE(idle_fin_close_ms >= 0 && idle_fin_close_ms < 800);
 }
 
 /* The same over TLS. A clear-text stand-in engine: records pass through unchanged, and its
@@ -2942,9 +3017,11 @@ static kl_ssize_t livetls_write(KlTls *self, KlSocketHandle fd, const void *buf,
     return livetls_put((LiveTls *)self, fd, buf, len);
 }
 static int g_livetls_shutdowns;   /* every shutdown call (the server thread; read after join) */
+static int g_livetls_refuse_cn;   /* readiness: the first close_notify meets a full socket */
 static KlTlsResult livetls_shutdown(KlTls *self, KlSocketHandle fd) {
     LiveTls *t = (LiveTls *)self;
     g_livetls_shutdowns++;
+    if (!t->comp && kl_atomic_cas_int(&g_livetls_refuse_cn, 1, 0)) return KL_TLS_WANT_WRITE;
     if (!t->cn_sent && livetls_put(t, fd, LTLS_CN, 4) == 4) t->cn_sent = 1;   /* sent once */
     return KL_TLS_OK;
 }
@@ -3088,6 +3165,79 @@ UTEST(h2, a_done_tls_session_lingers_on_the_servers_loop) {
         ASSERT_EQ(eof_b, 1);
         ASSERT_TRUE(closed_b >= 0);
     }
+}
+
+/* The same transport end for HTTP/1.1 (the TLS stand-in above; no HTTP/2 involved): a request
+ * rejected before its body (413, Content-Length past max_body_size) is answered, then close_notify,
+ * then the FIN, while the body still arriving is discarded; on both models. On a readiness loop the
+ * first close_notify can meet a full socket (WANT_WRITE): the half-close then waits for it, and it
+ * goes out on writability. It used to half-close first, so close_notify never reached the wire. */
+static KlHttpServer g_h1t_srv;
+static void h1t_server_thread(void *arg) { (void)arg; kl_http_server_run(&g_h1t_srv); }
+static void h1t_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)req; (void)ud;
+    kl_http_response_body_copy(res, "unreached", 9);
+}
+
+/* One rejected upload; 1 if the 413, then close_notify alone, then a clean end of stream arrived. */
+static int h1t_reject_once(int port) {
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return 0;
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    int ok = 0;
+    if (connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0) {
+        static const char head[] = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n";
+        char body[4096];
+        memset(body, 'b', sizeof body);
+        (void)kl_test_sockwrite(fd, head, sizeof head - 1);
+        (void)kl_test_sockwrite(fd, body, sizeof body);  /* the body the drain discards */
+        char got[4096];
+        size_t n = 0;
+        int eof = 0;
+        while (n < sizeof got && kl_test_poll1(fd, 0, 3000) > 0) {
+            long rr = kl_test_sockread(fd, got + n, sizeof got - n);
+            if (rr == 0) { eof = 1; break; }
+            if (rr < 0) { eof = -1; break; }
+            n += (size_t)rr;
+        }
+        ok = eof == 1 && n > 16 && memcmp(got, "HTTP/1.1 413", 12) == 0 &&
+             memcmp(got + n - 4, LTLS_CN, 4) == 0;
+    }
+    kl_test_closesock(fd);
+    return ok;
+}
+
+UTEST(h1_tls_drain, a_rejected_request_gets_its_answer_then_close_notify_then_the_fin) {
+    test_setup();
+    static int dummy_ctx;
+    KlTlsConfig tls = { .ctx = (KlTlsCtx *)&dummy_ctx, .factory = livetls_factory };
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .tls = &tls,
+                               .max_body_size = 1024, .read_timeout_ms = 1500,
+                               .max_connections = 2 };
+    ASSERT_EQ(kl_http_server_init(&g_h1t_srv, &cfg), 0);
+    int comp = (kl_event_caps(&g_h1t_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    kl_http_server_route(&g_h1t_srv, "POST", "/up", h1t_handler, NULL, NULL);
+    g_livetls_shutdowns = 0;
+    kl_atomic_store_int(&g_livetls_refuse_cn, 0);
+    KlPlatThread t;
+    kl_plat_thread_create(&t, h1t_server_thread, NULL);
+    for (int i = 0; i < 200 && g_h1t_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+
+    int first = h1t_reject_once(g_h1t_srv.bound_port);
+    kl_atomic_store_int(&g_livetls_refuse_cn, !comp);   /* readiness: the next one is refused once */
+    kl_test_sleep_ms(50);
+    int refused = h1t_reject_once(g_h1t_srv.bound_port);
+
+    kl_http_server_stop(&g_h1t_srv);
+    kl_plat_thread_join(&t);
+    kl_http_server_free(&g_h1t_srv);
+    test_teardown();
+    ASSERT_TRUE(first);                                    /* was: the 413, then a FIN alone */
+    ASSERT_TRUE(refused);                                  /* the half-close waited for it */
 }
 
 /* ── A session whose flush reports the stream it just finished as closed ───────────────────── */

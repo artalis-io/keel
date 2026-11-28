@@ -317,7 +317,7 @@ void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
         }
         c->tls->reset(c->tls);
     }
-    c->tls_shutdown_sent = 0;
+    c->tls_shutdown_sent = c->tls_shutdown_pending = 0;
     if (kl_handle_valid(c->stream.fd)) {
         kl_sock_close(conn_sp(c), c->stream.fd);
         c->stream.fd = KL_INVALID_SOCKET;
@@ -1622,6 +1622,52 @@ static int conn_drain_feed(KlHttpConn *c, const char *data, size_t len) {
  * slot is held until the client hangs up or read_timeout_ms passes. A client that only stalled (it
  * neither reads, sends nor closes) is held to that deadline too: the idle timeout every connection
  * has. Readiness half-closes now; a completion loop once the queued output is out. */
+/* The graceful end of the server's sending side, for every drain (a rejected request's, the
+ * linger after an answer, a protocol that finished its connection): once the protocol's last output
+ * is out, TLS close_notify after it, then the TCP half-close, while the receive side stays up for the
+ * drain's bounded reads. In that order on both models:
+ *   - completion: the engine writes close_notify into its ring, behind the last record; the caller's
+ *     flush puts the ring on the output queue, and the half-close waits until the queue has sent it
+ *     all (comp_tlsq_then_shutwr);
+ *   - readiness: the engine writes close_notify to the socket. A full send buffer refuses it
+ *     (WANT_WRITE): the half-close then waits too (tls_shutdown_pending), and the drain watches for
+ *     writability to finish it (kl_http_conn_drain_on_writable). A client that never reads leaves it
+ *     pending until the drain's deadline, which then closes.
+ * close_notify is sent once: the release does not send it again on a socket whose send side is shut.
+ * Best effort, as the half-close is: a provider without half-close, or an engine that fails the
+ * alert, still drains. */
+static void conn_graceful_half_close(KlHttpConn *c) {
+    if (c->tls && !c->tls_shutdown_sent) {
+        KlTlsResult r = c->tls->shutdown(c->tls, c->stream.fd);
+        c->tls_shutdown_sent = 1;
+        if (!c->comp_driven && r == KL_TLS_WANT_WRITE) {
+            c->tls_shutdown_pending = 1;       /* half-close once the alert is out */
+            return;
+        }
+    }
+    if (c->comp_driven)
+        c->comp_tlsq_then_shutwr = 1;          /* once the queued output is out */
+    else
+        (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
+}
+
+KlHttpConnState kl_http_conn_drain_on_writable(KlHttpConn *c) {
+    if (c->state != KL_HTTP_CONN_DRAINING || !c->tls_shutdown_pending) return c->state;
+    if (c->tls->shutdown(c->tls, c->stream.fd) == KL_TLS_WANT_WRITE) return c->state;
+    c->tls_shutdown_pending = 0;
+    (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
+    return c->state;
+}
+
+KlEventMask kl_http_conn_drain_interest(const KlHttpConn *c, int can_hangup) {
+    /* Past the linger's cap it reads no more: only the hang-up is watched (where the loop can), else
+     * nothing until the deadline. A close_notify still to finish needs writability. */
+    KlEventMask m = KL_EVENT_READ;
+    if (c->answer_linger_stopped) m = can_hangup ? KL_EVENT_HANGUP : (KlEventMask)0;
+    if (c->tls_shutdown_pending) m = (KlEventMask)(m | KL_EVENT_WRITE);
+    return m;
+}
+
 static KlHttpConnState conn_enter_linger(KlHttpConn *c, size_t cap, uint32_t ms, const char *why) {
     size_t linger_cap = c->max_body_size > cap ? c->max_body_size : cap;
     c->answer_linger = 1;
@@ -1629,10 +1675,7 @@ static KlHttpConnState conn_enter_linger(KlHttpConn *c, size_t cap, uint32_t ms,
     c->drain_budget = linger_cap;
     c->drain_deadline_ms = kl_monotonic_ms() +
                            (uint64_t)(c->answer_linger_ms ? c->answer_linger_ms : ms);
-    if (c->comp_driven)
-        c->comp_tlsq_then_shutwr = 1;
-    else
-        (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
+    conn_graceful_half_close(c);
     c->state = KL_HTTP_CONN_DRAINING;
     DRAIN_TRACE(c, why);
     (void)why;                                 /* the trace is compiled out by default */
@@ -1723,15 +1766,12 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
         DRAIN_TRACE(c, "over-sent-past-framing");   /* drain the excess rather than reset it away */
     }
 
-    /* Half-close SEND so the peer sees orderly end-of-response while we keep receiving. Best-effort:
-     * a provider without half-close returns -1 and the drain still removes the unread-data condition. */
-    /* On a completion loop the final response reaches the socket through the driver's output queue
-     * (with TLS it may still be ciphertext in the engine's ring): half-closing now would cut it off.
-     * The completion driver half-closes once that output is out (comp_tlsq_then_shutwr). */
-    if (c->comp_driven)
-        c->comp_tlsq_then_shutwr = 1;
-    else
-        (void)kl_sock_shutdown(conn_sp(c), c->stream.fd, KL_SHUT_WR);
+    /* Half-close SEND (after close_notify, with TLS) so the peer sees orderly end-of-response while
+     * we keep receiving. Best-effort: a provider without half-close returns -1 and the drain still
+     * removes the unread-data condition. On a completion loop the final response reaches the socket
+     * through the driver's output queue (with TLS it may still be ciphertext in the engine's ring):
+     * half-closing now would cut it off, so the driver half-closes once that output is out. */
+    conn_graceful_half_close(c);
 
     /* The configured cap is the ONLY byte bound (#281). This used to be min(remaining, cap), where
      * `remaining` came from the declared Content-Length, to avoid sitting out the deadline waiting
@@ -1769,17 +1809,7 @@ KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c) {
     c->drain_framing_usable = 0;
     c->request_body_complete = 0;
     c->reject_discard = 0;
-    /* TLS: close_notify goes out ahead of the FIN, after the last record. On readiness it is best
-     * effort: a full send buffer can leave it unsent, or only partly written (the engine keeps the
-     * rest, which the half-close then cuts off), and the client sees a truncated TLS end, though
-     * every record before it arrived whole. On a completion loop the engine writes it to its ring,
-     * and the caller's flush puts it on the output queue behind everything already there. Sent
-     * once: the release does not send it again on a socket whose send side is shut. */
-    if (c->tls) {
-        (void)c->tls->shutdown(c->tls, c->stream.fd);
-        c->tls_shutdown_sent = 1;
-    }
-    return conn_enter_linger(c, cap, ms, "enter-linger");
+    return conn_enter_linger(c, cap, ms, "enter-linger");   /* close_notify, then the half-close */
 }
 
 /* Account bytes already received into read_buf[0..nread] and decide whether to keep draining. The

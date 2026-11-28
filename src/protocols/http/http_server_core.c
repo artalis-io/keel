@@ -697,17 +697,21 @@ static const char kl_408_response[] =
     "Connection: close\r\n"
     "\r\n";
 
-/* The sweep's end of a done HTTP/2 session: the protocol's linger (h2h->finish), driven on the
- * connection's own model as the dispatch would (readiness: READ armed; completion: the output sent,
- * the half-close after it, a receive posted). 1 if it lingers or was closed, 0 to close it as
- * before (a failed session, the drain disabled, a connection the completion driver does not own). */
+/* The sweep's graceful end of an HTTP/2 connection (its session done, or timed out idle after its
+ * GOAWAY): the protocol's linger (h2h->finish), driven on the connection's own model as the dispatch
+ * would (readiness: the drain's interest armed; completion: the output sent, the half-close after
+ * it, a receive posted). 1 if it lingers or was closed, 0 to close it as before (a failed session,
+ * the drain disabled, a connection the completion driver does not own). */
 static int server_h2_finish(KlHttpServer *s, KlHttpConn *tc, int completion_loop) {
     const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     if (!h2h || !h2h->finish || (completion_loop && !tc->comp_driven)) return 0;
     if (h2h->finish(tc) != KL_HTTP_CONN_DRAINING) return 0;
     if (completion_loop) {
         kl_http_comp_linger(s, tc);
-    } else if (kl_event_mod(&s->ev.loop, tc->stream.fd, KL_EVENT_READ, &tc->stream) < 0) {
+    } else if (kl_event_mod(&s->ev.loop, tc->stream.fd,
+                            kl_http_conn_drain_interest(
+                                tc, (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) != 0),
+                            &tc->stream) < 0) {
         kl_event_del(&s->ev.loop, tc->stream.fd);
         kl_http_server_conn_release(s, tc);
     }
@@ -773,8 +777,8 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             } else if (tc->answer_linger_stopped && !was_stopped) {
                 /* This read reached the linger's cap: read no more, watch only for the hang-up
                  * (where the loop can), as the dispatch's transition does. */
-                KlEventMask dm = (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP)
-                                     ? KL_EVENT_HANGUP : (KlEventMask)0;
+                KlEventMask dm = kl_http_conn_drain_interest(
+                    tc, (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) != 0);
                 if (kl_event_mod(&s->ev.loop, tc->stream.fd, dm, &tc->stream) < 0) {
                     kl_event_del(&s->ev.loop, tc->stream.fd);
                     kl_http_server_conn_release(s, tc);
@@ -807,17 +811,26 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
         }
         /* HTTP/2: streams in progress are the session's business, but a connection with none open
          * and nothing to send is idle, and is timed out like any other idle connection; one whose
-         * session is done (a graceful GOAWAY out, no stream left) or failed is closed now. */
+         * session is done (a graceful GOAWAY out, no stream left) or failed is ended now. Two kinds
+         * of end:
+         *   - graceful (a done session, an idle timeout): the GOAWAY, then the lingering half-close
+         *     (h2h->finish): the client's frames that cross it are discarded, so the output already
+         *     admitted (the GOAWAY, the end of a response) is not reset away;
+         *   - a failed session (its transport broke): closed now, nothing can be delivered.
+         * A forced end (the drain deadline, a second stop, kl_http_server_free) releases whatever is
+         * left, lingering or not, and delivery is not guaranteed then. */
         if (tc->state == KL_HTTP_CONN_HTTP2) {
             const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
             if (!h2h) continue;
             int done = h2h->done && h2h->done(tc);
             if (!done && !(h2h->idle && h2h->idle(tc) && now - tc->last_active_ms > timeout))
                 continue;
-            if (done && server_h2_finish(s, tc, completion_loop)) continue;
             /* An idle close says so first: a graceful GOAWAY (RFC 9113 6.8), flushed. A done
              * session sent its GOAWAY already (a no-op here). */
             if (!done && h2h->drain_shutdown) h2h->drain_shutdown(tc);
+            if (server_h2_finish(s, tc, completion_loop)) continue;   /* graceful: the linger */
+            /* A failed session, the drain disabled, a connection the completion driver does not
+             * own: closed, as before the linger. */
             if (completion_loop && tc->comp_driven) {
                 /* The GOAWAY is on the output queue (with TLS, possibly still in the engine): send
                  * it, then close once it is out. The receive still posted completes on its own. */
