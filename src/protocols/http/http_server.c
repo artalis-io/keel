@@ -538,7 +538,8 @@ int kl_http_server_run(KlHttpServer *s) {
                 } else if (fstate == KL_HTTP_CONN_READING) {
                     kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
                 } else if (fstate == KL_HTTP_CONN_DRAINING) {
-                    kl_event_mod(&s->ev.loop, fc->stream.fd, KL_EVENT_READ, &fc->stream);
+                    kl_event_mod(&s->ev.loop, fc->stream.fd, kl_http_server_drain_mask(s, fc),
+                                 &fc->stream);
                 } else if (fstate == KL_HTTP_CONN_CLOSED) {
                     kl_event_del(&s->ev.loop, fc->stream.fd);
                     kl_http_server_conn_release(s, fc);
@@ -796,9 +797,8 @@ transition:
                  * deadline, so a client that simply stops sending still gets closed. */
                 /* A lingering drain past its cap reads no more: only the hang-up is watched (where
                  * the loop can), else no interest at all until the deadline. */
-                KlEventMask dm = kl_http_conn_drain_interest(
-                    c, (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) != 0);
-                if (kl_event_mod(&s->ev.loop, c->stream.fd, dm, &c->stream) < 0) {
+                if (kl_event_mod(&s->ev.loop, c->stream.fd, kl_http_server_drain_mask(s, c),
+                                 &c->stream) < 0) {
                     kl_event_del(&s->ev.loop, c->stream.fd);
                     kl_http_server_conn_release(s, c);
                 }

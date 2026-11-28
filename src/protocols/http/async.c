@@ -433,10 +433,11 @@ void kl_async_complete(KlHttpServer *s, KlAsyncOp *op) {
         break;
     case KL_HTTP_CONN_DRAINING:
         /* The handler answered without consuming the request body, so the response is flushed with
-         * input still unread (#278). Arm READ so each readable tick discards one bounded chunk,
-         * exactly as the main readiness transition does; the idle sweep enforces the byte and time
-         * bounds and releases. */
-        if (async_rearm(s, conn, KL_EVENT_READ) < 0)
+         * input still unread (#278). The drain's interest, as the main readiness transition sets
+         * it: READ so each readable tick discards one bounded chunk, and WRITE while a close_notify
+         * a full socket refused is still to go; the idle sweep enforces the byte and time bounds
+         * and releases. */
+        if (async_rearm(s, conn, kl_http_server_drain_mask(s, conn)) < 0)
             async_release(s, conn);
         break;
     case KL_HTTP_CONN_READING:

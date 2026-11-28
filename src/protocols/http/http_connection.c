@@ -310,7 +310,9 @@ void kl_http_conn_release(KlHttpConnPool *pool, KlHttpConn *c) {
      * Retry on WANT_WRITE to flush the close_notify record.
      * Give up on WANT_READ (can't block for peer's close_notify). */
     if (c->tls && kl_handle_valid(c->stream.fd)) {
-        if (!c->tls_shutdown_sent) {    /* the linger sent it already, before its half-close */
+        /* A drain sent it already, before its half-close; one a full socket refused (pending, the
+         * send side still open) is retried here. */
+        if (!c->tls_shutdown_sent || c->tls_shutdown_pending) {
             KlTlsResult sr = c->tls->shutdown(c->tls, c->stream.fd);
             for (int i = 0; sr == KL_TLS_WANT_WRITE && i < 4; i++)
                 sr = c->tls->shutdown(c->tls, c->stream.fd);
@@ -352,7 +354,8 @@ void kl_http_conn_pool_free(KlHttpConnPool *pool) {
             conn_cleanup_body_reader(&pool->conns[i]);   /* the reader and the head copy */
             conn_comp_tlsq_reset(&pool->conns[i]);
             if (pool->conns[i].tls && pool->conns[i].tls->shutdown &&
-                !pool->conns[i].tls_shutdown_sent &&      /* the linger sent it already */
+                (!pool->conns[i].tls_shutdown_sent ||     /* a drain sent it already, unless */
+                 pool->conns[i].tls_shutdown_pending) &&  /* a full socket refused it */
                 kl_handle_valid(pool->conns[i].stream.fd)) {
                 KlTlsResult sr = pool->conns[i].tls->shutdown(
                     pool->conns[i].tls, pool->conns[i].stream.fd);
@@ -1616,12 +1619,6 @@ static int conn_drain_feed(KlHttpConn *c, const char *data, size_t len) {
              ((c)->req.chunked ? 1 : 0) | ((c)->request_body_complete ? 2 : 0)       \
                  | ((c)->drain_framing_usable ? 4 : 0))
 
-/* The lingering half-close, shared by a rejected request's streamed answer and a protocol that
- * finished its connection (kl_http_conn_begin_linger). Bounded: at most `linger_cap` more bytes are
- * read (plus one receive window on a completion loop, whose receive is posted whole), then none; the
- * slot is held until the client hangs up or read_timeout_ms passes. A client that only stalled (it
- * neither reads, sends nor closes) is held to that deadline too: the idle timeout every connection
- * has. Readiness half-closes now; a completion loop once the queued output is out. */
 /* The graceful end of the server's sending side, for every drain (a rejected request's, the
  * linger after an answer, a protocol that finished its connection): once the protocol's last output
  * is out, TLS close_notify after it, then the TCP half-close, while the receive side stays up for the
@@ -1668,13 +1665,18 @@ KlEventMask kl_http_conn_drain_interest(const KlHttpConn *c, int can_hangup) {
     return m;
 }
 
-static KlHttpConnState conn_enter_linger(KlHttpConn *c, size_t cap, uint32_t ms, const char *why) {
-    size_t linger_cap = c->max_body_size > cap ? c->max_body_size : cap;
+/* The lingering half-close, shared by a rejected request's streamed answer and a protocol that
+ * finished its connection (kl_http_conn_begin_linger). Bounded: at most `linger_cap` more bytes are
+ * read (plus one receive window on a completion loop, whose receive is posted whole), then none; the
+ * slot is held until the client hangs up or `linger_ms` passes. A client that only stalled (it
+ * neither reads, sends nor closes) is held to that deadline too. The caller chooses the bounds; this
+ * only applies them. Readiness half-closes now; a completion loop once the queued output is out. */
+static KlHttpConnState conn_enter_linger(KlHttpConn *c, size_t linger_cap, uint32_t linger_ms,
+                                         const char *why) {
     c->answer_linger = 1;
     c->answer_linger_stopped = 0;
     c->drain_budget = linger_cap;
-    c->drain_deadline_ms = kl_monotonic_ms() +
-                           (uint64_t)(c->answer_linger_ms ? c->answer_linger_ms : ms);
+    c->drain_deadline_ms = kl_monotonic_ms() + (uint64_t)linger_ms;
     conn_graceful_half_close(c);
     c->state = KL_HTTP_CONN_DRAINING;
     DRAIN_TRACE(c, why);
@@ -1720,7 +1722,9 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
             c->state = KL_HTTP_CONN_CLOSED;
             return c->state;
         }
-        return conn_enter_linger(c, cap, ms, "enter-after-answer");
+        return conn_enter_linger(c, c->max_body_size > cap ? c->max_body_size : cap,
+                                 c->answer_linger_ms ? c->answer_linger_ms : ms,
+                                 "enter-after-answer");
     }
 
     /* Drain disabled, or the fd is already gone: close directly, exactly as before #278. A zero cap or
@@ -1793,7 +1797,7 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c) {
     return c->state;
 }
 
-KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c) {
+KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c, KlHttpLingerKind kind) {
     size_t cap = c->reject_drain_max_bytes;
     uint32_t ms = c->reject_drain_timeout_ms;
     /* The drain disabled (reject_drain_disable zeroes both), or the fd already gone: close as
@@ -1809,7 +1813,13 @@ KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c) {
     c->drain_framing_usable = 0;
     c->request_body_complete = 0;
     c->reject_discard = 0;
-    return conn_enter_linger(c, cap, ms, "enter-linger");   /* close_notify, then the half-close */
+    /* After output the client is owed, the answer's bounds: it may still be reading that output.
+     * After a timeout's notice (a GOAWAY), the drain's own short bounds: there is no answer to wait
+     * for, and a client that timed out is not given another read_timeout_ms. */
+    if (kind == KL_HTTP_LINGER_NOTICE)
+        return conn_enter_linger(c, cap, ms, "enter-linger-notice");
+    return conn_enter_linger(c, c->max_body_size > cap ? c->max_body_size : cap,
+                             c->answer_linger_ms ? c->answer_linger_ms : ms, "enter-linger");
 }
 
 /* Account bytes already received into read_buf[0..nread] and decide whether to keep draining. The

@@ -1149,11 +1149,11 @@ static int h2_session_done(const KlHttp2ServerConn *h2c) {
  * drops the tail the kernel still holds of responses the server counts as sent. A done session has
  * no stream left; any the bookkeeping still holds are released (their producers told) first, so
  * nothing writes to the connection once it lingers. A failed session closes, as before. */
-static KlHttpConnState h2_finish_done(KlHttpConn *c) {
+static KlHttpConnState h2_finish_done(KlHttpConn *c, KlHttpLingerKind kind) {
     KlHttp2ServerConn *h2c = c->h2;
     if (!h2c || !h2c->session || h2c->failed) return KL_HTTP_CONN_CLOSED;
     h2_streams_release_all(h2c);
-    return kl_http_conn_begin_linger(c);
+    return kl_http_conn_begin_linger(c, kind);
 }
 
 /* Transport-agnostic h2 core: feed already-received plaintext to the session (parse
@@ -1185,7 +1185,7 @@ KlHttpConnState kl_http2_server_feed(KlHttpConn *c, const void *data, size_t len
     /* Session done: end it now rather than waiting until the peer times out. Flushed above, so
      * the GOAWAY is on its way; the linger lets it, and everything before it, arrive. */
     if (h2_session_done(h2c))
-        return h2_finish_done(c);
+        return h2_finish_done(c, KL_HTTP_LINGER_AFTER_OUTPUT);
 
     return KL_HTTP_CONN_HTTP2;
 }
@@ -1219,7 +1219,7 @@ int kl_http2_server_on_writable(KlHttpConn *c) {
 
     /* The last response of a graceful shutdown can finish here rather than after a read. */
     if (h2_session_done(h2c))
-        return h2_finish_done(c);
+        return h2_finish_done(c, KL_HTTP_LINGER_AFTER_OUTPUT);
 
     return KL_HTTP_CONN_HTTP2;
 }
@@ -1277,10 +1277,12 @@ static int kl_http2_server_done_hook(const KlHttpConn *c) {
     return c->h2 && c->h2->session && (c->h2->failed || h2_session_done(c->h2));
 }
 
-/* The sweep ends a connection gracefully (its session done, or idle past its timeout after the
- * GOAWAY): the linger (DRAINING), or CLOSED for a failed session or with the drain disabled. */
-static KlHttpConnState kl_http2_server_finish_hook(KlHttpConn *c) {
-    return h2_finish_done(c);
+/* The sweep ends a connection gracefully: the linger (DRAINING), or CLOSED for a failed session or
+ * with the drain disabled. A done session's last output is owed to the client (the answer's
+ * bounds); a timed-out one (`timed_out`: idle past its timeout, its GOAWAY just out) only needs its
+ * GOAWAY to arrive (the drain's short bounds). */
+static KlHttpConnState kl_http2_server_finish_hook(KlHttpConn *c, int timed_out) {
+    return h2_finish_done(c, timed_out ? KL_HTTP_LINGER_NOTICE : KL_HTTP_LINGER_AFTER_OUTPUT);
 }
 
 /* Once per loop iteration, before the loop waits, on both event models (kl_http_server_settle_h2):

@@ -166,8 +166,9 @@ typedef struct KlHttpServerConfig {
      * drain, the client's GOAWAY, a protocol error), or that the idle timeout ends after its GOAWAY,
      * ends the same way, with the same bounds: once its output is out it sends close_notify (TLS)
      * and half-closes, then discards what the client still sends (PING, WINDOW_UPDATE) until the
-     * client's FIN, past the cap the hang-up, or read_timeout_ms. reject_drain_disable makes it
-     * close at once instead.
+     * client's FIN, past the cap the hang-up, or read_timeout_ms (after an idle timeout's GOAWAY:
+     * reject_drain_max_bytes and reject_drain_timeout_ms). reject_drain_disable makes it close at
+     * once instead.
      *
      * Full contract, including why the byte-cap regression test deliberately does not assert
      * delivery: docs/contracts/early_rejection_drain.md */

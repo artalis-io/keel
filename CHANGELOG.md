@@ -151,8 +151,9 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   the client's FIN.
 - **HTTP/2: the idle timeout's close is graceful too.** An idle connection the sweep timed out got
   its GOAWAY and was closed at once, so a client frame crossing the GOAWAY reset it away. It now
-  ends through the same linger. A client that never closes holds the slot up to `read_timeout_ms`
-  more.
+  ends through the same linger, with the drain's short bounds (`reject_drain_max_bytes`,
+  `reject_drain_timeout_ms`): it only has to deliver the GOAWAY, so a client that timed out gets no
+  second `read_timeout_ms`.
 - **TLS: a drain's close_notify reaches the client.** After a rejected request (a 413, 431, 408),
   HTTP/1.1 half-closed the connection before the TLS shutdown, so close_notify was written to a shut
   socket and the client saw its answer end in a truncation. Every drain, HTTP/1.1 and HTTP/2 alike,

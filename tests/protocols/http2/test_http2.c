@@ -1599,6 +1599,7 @@ UTEST(h2, idle_sweep_sends_goaway_then_lingers) {
     c->last_active_ms = now - 1000;                        /* idle past read_timeout_ms */
     kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
     int shutdowns = mock.shutdown_count, destroyed = mock.destroy_count, st = (int)c->state;
+    int64_t idle_linger_ms = (int64_t)c->drain_deadline_ms - (int64_t)now;
     char got[64];
     int eof = 0;
     size_t n = 0;
@@ -1622,6 +1623,9 @@ UTEST(h2, idle_sweep_sends_goaway_then_lingers) {
     }
     ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);             /* was CLOSED: an abortive close */
     ASSERT_EQ(destroyed, 0);
+    /* A timeout's end lingers with the drain's short bound (reject_drain_timeout_ms, 500 ms by
+     * default), not another read_timeout_ms: here 100 ms, so it must be the 500. */
+    ASSERT_TRUE(idle_linger_ms >= 450 && idle_linger_ms <= 550);
     ASSERT_EQ(n, (size_t)17);                              /* the GOAWAY, whole */
     ASSERT_EQ(eof, 1);                                     /* then the FIN */
     ASSERT_EQ(destroyed_after_fin, 1);                     /* the client's FIN ends it */
@@ -1653,6 +1657,7 @@ UTEST(h2, sweep_ends_a_finished_session_through_the_linger) {
     c->last_active_ms = now;                               /* not idle long: only "done" ends it */
     kl_http_server_sweep_conn_timeouts(&h2_sweep_srv, now, comp);
     int st = (int)c->state, destroyed = mock.destroy_count;
+    int64_t done_linger_ms = (int64_t)c->drain_deadline_ms - (int64_t)now;
     char b[8];
     long fin = -2, after_fin = -2;
     int destroyed_after_fin = -1;
@@ -1676,6 +1681,9 @@ UTEST(h2, sweep_ends_a_finished_session_through_the_linger) {
     }
     ASSERT_EQ(st, (int)KL_HTTP_CONN_DRAINING);             /* was CLOSED: a close over unread input */
     ASSERT_EQ(destroyed, 0);
+    /* A done session's output is owed to the client: the answer's bound (read_timeout_ms, here
+     * 100 ms), not the drain's 500 ms. */
+    ASSERT_TRUE(done_linger_ms >= 50 && done_linger_ms <= 150);
     ASSERT_EQ(fin, 0L);                                    /* the client sees the end at once */
     ASSERT_EQ(after_fin, (long)KL_HTTP_CONN_DRAINING);     /* the PING is discarded, no reset */
     ASSERT_EQ(destroyed_after_fin, 1);                     /* the client's FIN ends it */
@@ -3238,6 +3246,112 @@ UTEST(h1_tls_drain, a_rejected_request_gets_its_answer_then_close_notify_then_th
     test_teardown();
     ASSERT_TRUE(first);                                    /* was: the 413, then a FIN alone */
     ASSERT_TRUE(refused);                                  /* the half-close waited for it */
+}
+
+/* An answer given after an async resume, with input still unread (a pipelined request read with
+ * this one: the connection is not reused and ends through the drain), also ends with close_notify
+ * then the FIN; and when a full socket refuses that close_notify (WANT_WRITE), the
+ * resumed connection must be watched for writability, so the alert and the FIN follow at once
+ * rather than at the drain's deadline (here 3 s). The same for the sweep's 408 on a head that
+ * stalled: the drain it starts must be watched for writability too. */
+static KlAsyncOp g_ar_op;
+static void ar_resume(KlAsyncOp *op, void *ud) {
+    (void)ud;
+    KlHttpResponse *res = kl_http_conn_response(op->conn);
+    kl_http_response_status(res, 200);
+    kl_http_response_body_copy(res, "late", 4);
+}
+static void ar_cancel(KlAsyncOp *op, void *ud) { (void)op; (void)ud; }
+static void ar_timer(void *ud) { (void)ud; kl_async_complete(&g_h1t_srv, &g_ar_op); }
+static void ar_handler(KlHttpRequest *req, KlHttpResponse *res, void *ud) {
+    (void)res; (void)ud;
+    memset(&g_ar_op, 0, sizeof g_ar_op);
+    g_ar_op.on_resume = ar_resume;
+    g_ar_op.on_cancel = ar_cancel;
+    if (kl_async_suspend(&g_h1t_srv, kl_http_request_conn(req), &g_ar_op) == 0)
+        (void)kl_timer_add(kl_http_server_event_ctx(&g_h1t_srv), 50, ar_timer, NULL);
+}
+
+UTEST(h1_tls_drain, an_async_answer_with_a_refused_close_notify_ends_when_writable) {
+    test_setup();
+    static int dummy_ctx;
+    KlTlsConfig tls = { .ctx = (KlTlsCtx *)&dummy_ctx, .factory = livetls_factory };
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1", .tls = &tls,
+                               .read_timeout_ms = 5000, .reject_drain_timeout_ms = 3000,
+                               .header_timeout_ms = 300, .max_connections = 2 };
+    ASSERT_EQ(kl_http_server_init(&g_h1t_srv, &cfg), 0);
+    int comp = (kl_event_caps(&g_h1t_srv.ev.loop) & KL_EVENT_CAP_COMPLETION) != 0;
+    kl_http_server_route(&g_h1t_srv, "POST", "/as", ar_handler, NULL, NULL);
+    kl_atomic_store_int(&g_livetls_refuse_cn, !comp);     /* readiness: refused once */
+    KlPlatThread t;
+    kl_plat_thread_create(&t, h1t_server_thread, NULL);
+    for (int i = 0; i < 200 && g_h1t_srv.bound_port == 0; i++) kl_test_sleep_ms(10);
+
+    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)g_h1t_srv.bound_port);
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    int ok = 0, refused_used = 0;
+    long took = -1;
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0) {
+        /* The whole request and a pipelined one in one write: the server reads both at once, so
+         * nothing more becomes readable to rescue a drain that is not watched for writability. */
+        static const char req2[] = "POST /as HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nbbbb"
+                                   "GET /next HTTP/1.1\r\nHost: x\r\n\r\n";
+        uint64_t t0 = kl_monotonic_ms();
+        (void)kl_test_sockwrite(fd, req2, sizeof req2 - 1);
+        char got[2048];
+        size_t n = 0;
+        int eof = 0;
+        while (n < sizeof got && kl_test_poll1(fd, 0, 5000) > 0) {
+            long rr = kl_test_sockread(fd, got + n, sizeof got - n);
+            if (rr == 0) { eof = 1; break; }
+            if (rr < 0) { eof = -1; break; }
+            n += (size_t)rr;
+        }
+        took = (long)(kl_monotonic_ms() - t0);
+        ok = eof == 1 && n > 16 && memcmp(got, "HTTP/1.1 200", 12) == 0 &&
+             memcmp(got + n - 4, LTLS_CN, 4) == 0;
+        refused_used = kl_atomic_load_int(&g_livetls_refuse_cn) == 0;
+    }
+    if (fd >= 0) kl_test_closesock(fd);
+
+    /* The sweep's 408 on a stalled head. */
+    kl_atomic_store_int(&g_livetls_refuse_cn, !comp);
+    int ok408 = 0, refused408 = 0;
+    long took408 = -1;
+    fd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0) {
+        uint64_t t0 = kl_monotonic_ms();
+        (void)kl_test_sockwrite(fd, "POST /as HTTP/1.1\r\nHo", 21);   /* and nothing more */
+        char got[2048];
+        size_t n = 0;
+        int eof = 0;
+        while (n < sizeof got && kl_test_poll1(fd, 0, 6000) > 0) {
+            long rr = kl_test_sockread(fd, got + n, sizeof got - n);
+            if (rr == 0) { eof = 1; break; }
+            if (rr < 0) { eof = -1; break; }
+            n += (size_t)rr;
+        }
+        took408 = (long)(kl_monotonic_ms() - t0);
+        ok408 = eof == 1 && n > 16 && memcmp(got, "HTTP/1.1 408", 12) == 0 &&
+                memcmp(got + n - 4, LTLS_CN, 4) == 0;
+        refused408 = kl_atomic_load_int(&g_livetls_refuse_cn) == 0;
+    }
+    if (fd >= 0) kl_test_closesock(fd);
+    kl_http_server_stop(&g_h1t_srv);
+    kl_plat_thread_join(&t);
+    kl_http_server_free(&g_h1t_srv);
+    test_teardown();
+    ASSERT_TRUE(ok);                                       /* the answer, close_notify, the FIN */
+    ASSERT_TRUE(refused_used);
+    ASSERT_TRUE(took >= 0 && took < 1500);                 /* was ~3 s: WRITE was not watched */
+    ASSERT_TRUE(ok408);
+    ASSERT_TRUE(refused408);
+    /* The header deadline (300 ms) plus up to one sweep tick (~1 s), not the drain's 3 s. */
+    ASSERT_TRUE(took408 >= 0 && took408 < 2600);
 }
 
 /* ── A session whose flush reports the stream it just finished as closed ───────────────────── */

@@ -702,15 +702,13 @@ static const char kl_408_response[] =
  * would (readiness: the drain's interest armed; completion: the output sent, the half-close after
  * it, a receive posted). 1 if it lingers or was closed, 0 to close it as before (a failed session,
  * the drain disabled, a connection the completion driver does not own). */
-static int server_h2_finish(KlHttpServer *s, KlHttpConn *tc, int completion_loop) {
+static int server_h2_finish(KlHttpServer *s, KlHttpConn *tc, int completion_loop, int timed_out) {
     const KlHttp2ServerHooks *h2h = kl_http2_server_hooks();
     if (!h2h || !h2h->finish || (completion_loop && !tc->comp_driven)) return 0;
-    if (h2h->finish(tc) != KL_HTTP_CONN_DRAINING) return 0;
+    if (h2h->finish(tc, timed_out) != KL_HTTP_CONN_DRAINING) return 0;
     if (completion_loop) {
         kl_http_comp_linger(s, tc);
-    } else if (kl_event_mod(&s->ev.loop, tc->stream.fd,
-                            kl_http_conn_drain_interest(
-                                tc, (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) != 0),
+    } else if (kl_event_mod(&s->ev.loop, tc->stream.fd, kl_http_server_drain_mask(s, tc),
                             &tc->stream) < 0) {
         kl_event_del(&s->ev.loop, tc->stream.fd);
         kl_http_server_conn_release(s, tc);
@@ -777,9 +775,8 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             } else if (tc->answer_linger_stopped && !was_stopped) {
                 /* This read reached the linger's cap: read no more, watch only for the hang-up
                  * (where the loop can), as the dispatch's transition does. */
-                KlEventMask dm = kl_http_conn_drain_interest(
-                    tc, (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) != 0);
-                if (kl_event_mod(&s->ev.loop, tc->stream.fd, dm, &tc->stream) < 0) {
+                if (kl_event_mod(&s->ev.loop, tc->stream.fd, kl_http_server_drain_mask(s, tc),
+                                 &tc->stream) < 0) {
                     kl_event_del(&s->ev.loop, tc->stream.fd);
                     kl_http_server_conn_release(s, tc);
                 }
@@ -828,7 +825,9 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
             /* An idle close says so first: a graceful GOAWAY (RFC 9113 6.8), flushed. A done
              * session sent its GOAWAY already (a no-op here). */
             if (!done && h2h->drain_shutdown) h2h->drain_shutdown(tc);
-            if (server_h2_finish(s, tc, completion_loop)) continue;   /* graceful: the linger */
+            /* Graceful: the linger; a timeout's end (not done: idle, its GOAWAY just out) with
+             * the drain's short bounds, so a client that timed out gets no second read_timeout. */
+            if (server_h2_finish(s, tc, completion_loop, !done)) continue;
             /* A failed session, the drain disabled, a connection the completion driver does not
              * own: closed, as before the linger. */
             if (completion_loop && tc->comp_driven) {
@@ -927,8 +926,16 @@ void kl_http_server_sweep_conn_timeouts(KlHttpServer *s, uint64_t now, int compl
                     kl_http_comp_tls_finish(s, tc, rs == KL_HTTP_CONN_DRAINING);
                     continue;
                 }
-                if (rs == KL_HTTP_CONN_DRAINING)
-                    continue;   /* drain first; the branch above closes it when a bound is reached */
+                if (rs == KL_HTTP_CONN_DRAINING) {
+                    /* Drain first; the branch above closes it when a bound is reached. Its interest
+                     * is the drain's (a close_notify a full socket refused needs WRITE). */
+                    if (kl_event_mod(&s->ev.loop, tc->stream.fd, kl_http_server_drain_mask(s, tc),
+                                     &tc->stream) < 0) {
+                        kl_event_del(&s->ev.loop, tc->stream.fd);
+                        kl_http_server_conn_release(s, tc);
+                    }
+                    continue;
+                }
             }
             if (completion_loop) {
                 kl_comp_cancel(&s->ev, tc->stream.fd);   /* abort op → release via its completion */
@@ -1087,6 +1094,10 @@ size_t kl_http_conn_write_window(const KlHttpConn *c, size_t len) {
 
 int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add) {
     return c->comp_driven && (kl_comp_ws_queue_full(c, add) || kl_comp_http2_queue_full(c, add));
+}
+
+KlEventMask kl_http_server_drain_mask(const KlHttpServer *s, const KlHttpConn *c) {
+    return kl_http_conn_drain_interest(c, (kl_event_caps(&s->ev.loop) & KL_EVENT_CAP_HANGUP) != 0);
 }
 
 void kl_http_conn_request_write(KlHttpConn *c) {

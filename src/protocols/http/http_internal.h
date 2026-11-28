@@ -111,6 +111,12 @@ int kl_http_conn_out_would_block(const KlHttpConn *c, size_t add);
  * A completion loop sends from its queue, so there is nothing to do. */
 void kl_http_conn_request_write(KlHttpConn *c);
 
+/* Readiness: the interest of a connection in DRAINING (kl_http_conn_drain_interest on this loop's
+ * capabilities). Every readiness path that leaves a connection DRAINING registers it with this
+ * mask (the dispatch's transition, the sweep, an async resume, a file-I/O completion): a
+ * close_notify a full socket refused needs WRITE, or it waits for the deadline. */
+KlEventMask kl_http_server_drain_mask(const KlHttpServer *s, const KlHttpConn *c);
+
 /* The HTTP/2 settle pass, once per loop iteration before the wait (both event models): flush
  * HTTP/2 output written outside its connection's events. The check, run after everything else
  * that precedes the wait: 1 = output became due since, and the wait must not block. */

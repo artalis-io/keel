@@ -340,13 +340,21 @@ KlHttpConnState kl_http_conn_begin_drain(KlHttpConn *c);
  * left) without a reset: a close over unread input (the client's frames that crossed the GOAWAY) is
  * a reset, which drops what the server's send queue still holds. So it half-closes once its output
  * is out (TLS: close_notify first) and lingers in DRAINING, reading and discarding unframed, until
- * the client's FIN, past the linger's cap only the hang-up, or read_timeout_ms (answer_linger_ms).
- * The bounds are the rejection drain's (reject_drain_max_bytes, max_body_size), and
+ * the client's FIN, past the linger's cap only the hang-up, or the deadline. The caller's `kind`
+ * picks the bounds (KlHttpLingerKind), and
  * reject_drain_disable turns it off: CLOSED then, as for a fd already gone. Readiness half-closes
  * here; a completion-driven connection marks it for its output queue (comp_tlsq_then_shutwr), and
  * the caller puts the queued output (and a TLS engine's) on its way and keeps a receive posted
  * (kl_http_comp_linger). */
-KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c);
+typedef enum {
+    /* The protocol's last output is something the client is owed (the end of responses): the
+     * answer's bounds, max(reject_drain_max_bytes, max_body_size) and read_timeout_ms. */
+    KL_HTTP_LINGER_AFTER_OUTPUT = 0,
+    /* A timeout's notice (an idle connection's GOAWAY): the drain's short bounds,
+     * reject_drain_max_bytes and reject_drain_timeout_ms. */
+    KL_HTTP_LINGER_NOTICE
+} KlHttpLingerKind;
+KlHttpConnState kl_http_conn_begin_linger(KlHttpConn *c, KlHttpLingerKind kind);
 
 /* Readiness, DRAINING: the socket is writable. A close_notify the full socket refused when the drain
  * began is sent now, and the half-close follows it. Returns the state (DRAINING). */
