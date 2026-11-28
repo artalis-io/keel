@@ -162,8 +162,11 @@ struct KlHttpConn {
     KlTls *tls;
     int tls_shutdown_sent;      /* close_notify attempted by a drain, before its half-close (the
                                  * release does not repeat it); delivered unless abandoned */
-    int tls_shutdown_abandoned; /* ... but not delivered: the engine refused it for good or failed
-                                 * it; the FIN went without it (never a clean TLS shutdown) */
+    int tls_shutdown_abandoned; /* ... but not delivered: the engine refused it for good or
+                                 * returned KL_TLS_ERROR; the FIN went without it (never a clean
+                                 * TLS shutdown). The shipped OpenSSL and mbedTLS adapters map a
+                                 * shutdown error to KL_TLS_OK, so with them this records only a
+                                 * refusal given up on. */
     int tls_shutdown_pending;   /* readiness: close_notify refused by a full socket; the half-close
                                  * waits for it (kl_http_conn_drain_on_writable) */
     int tls_shutdown_tries;     /* writable events that close_notify was refused on (capped) */
