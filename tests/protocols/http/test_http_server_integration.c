@@ -900,6 +900,7 @@ UTEST(server_integration, a_start_that_fails_after_the_bind_publishes_no_port) {
     ASSERT_EQ(port, 0);                            /* was the bound port: published at the bind */
 }
 
+#ifndef KEEL_NO_COMPLETION   /* kl_comp_ops_builtin exists only with the completion axis */
 /* The same on a completion loop, whose accept path is set up after the listener is registered:
  * the backend's accept priming fails (as IOCP's does when the AcceptEx lookup fails), so the run
  * returns -1 and the port stays 0. The built-in completion backend's table, with prime_accepts
@@ -943,6 +944,7 @@ UTEST(server_integration, a_completion_start_whose_accept_setup_fails_publishes_
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(port, 0);                            /* was the bound port: published before the setup */
 }
+#endif /* !KEEL_NO_COMPLETION */
 
 /* A long download that keeps moving is not an idle connection. On a completion loop a buffered
  * response is one send op until all of it is out (the engine re-posts partial sends itself), and the
