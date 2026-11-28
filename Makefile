@@ -385,6 +385,10 @@ all: $(KEEL_LIB)
 
 # Include generated dependency files (after default target)
 -include $(CORE_OBJ:.o=.d) $(LLHTTP_OBJ:.o=.d)
+# The test binaries' own: each suite compiles and links in one step with -MMD -MP, which writes
+# tests/<...>/<suite>.d naming the binary as its target. Without these, a change to a test header
+# (tests/*.h: the stats probe, mock_tls.h, atomic_flags.h, ...) rebuilt nothing.
+-include $(wildcard tests/*.d tests/protocols/*/*.d)
 
 # `ar rcs` REPLACES members of the same name and leaves every other member in place, so archiving a
 # different backend's objects over an existing libkeel.a keeps the old backend's event TU: the
@@ -1395,6 +1399,7 @@ clean:
 	# binaries; these globs sweep ONLY the Windows .exe, dep files, and macOS .dSYM bundles
 	# (never .c/.h; a `test_*` glob would delete the sources too).
 	rm -f tests/protocols/*/test_*.exe tests/protocols/*/smoke_*.exe tests/protocols/*/*.d
+	rm -f tests/test_*.d tests/smoke_*.d
 	rm -rf tests/protocols/*/*.dSYM
 	rm -rf build   # the per-backend object tree (#280) covers every library object
 	# Completion-backend + completion-axis objects are build-conditional (EVENT_SRC per
