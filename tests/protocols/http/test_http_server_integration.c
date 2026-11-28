@@ -4,6 +4,7 @@
 #include <keel/keel.h>
 #include "socket.h"   /* internal: exercise the socket-provider seam */
 #include "event_caps.h"   /* internal: kl_event_caps (which event model the server got) */
+#include "event_builtin.h"   /* the built-in backend, wrapped below so registering the listener fails */
 #include "net_compat.h"
 #include "server_stats_probe.h"   /* kl_http_server_stats of a running server, from this thread */
 #include <string.h>
@@ -857,6 +858,45 @@ UTEST(server_integration, a_failed_start_leaves_running_clear) {
     kl_http_server_free(&srv);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(running, 0);                         /* was 1 */
+}
+
+/* The port is published only once startup has succeeded: a run whose start fails after the bind
+ * (here the loop refuses to register the listen socket, the one registration made with no udata)
+ * returns -1 and leaves kl_http_server_bound_port at 0, so a thread polling it never sees a port
+ * for a server that never started. */
+static int refuse_listener_add(KlEventLoop *l, KlSocketHandle fd, KlEventMask mask, void *udata) {
+    if (udata == NULL) return -1;                  /* the listen socket */
+    return kl_event_add_builtin(l, fd, mask, udata);
+}
+static const KlEventOps refuse_listener_ops = {
+    kl_event_init_builtin, refuse_listener_add, kl_event_mod_builtin, kl_event_del_builtin,
+    kl_event_wait_builtin, kl_event_close_builtin, kl_event_caps_builtin,
+    kl_event_native_provider_builtin, NULL,
+};
+static const KlEventProvider refuse_listener_provider = { &refuse_listener_ops, "refuse-listener" };
+
+UTEST(server_integration, a_start_that_fails_after_the_bind_publishes_no_port) {
+    /* The wrapper offers no completion ops, so it needs a readiness built-in backend. The ordering
+     * it checks (publish after every startup step) is shared by the completion path. */
+    KlEventLoop probe;
+    memset(&probe, 0, sizeof probe);
+    KlAllocator a = kl_allocator_default();
+    probe.alloc = &a;
+    if (kl_event_init(&probe) != 0) UTEST_SKIP("no event loop");
+    unsigned caps = kl_event_caps(&probe);
+    kl_event_close(&probe);
+    if (caps & KL_EVENT_CAP_COMPLETION) UTEST_SKIP("readiness only: the wrapper has no completion ops");
+    static KlHttpServer srv;
+    KlHttpServerConfig cfg = { .port = 0, .bind_addr = "127.0.0.1",
+                               .event_provider = &refuse_listener_provider };
+    ASSERT_EQ(0, kl_http_server_init(&srv, &cfg));
+    int rc = kl_http_server_run(&srv);
+    int port = kl_http_server_bound_port(&srv);
+    KlError err = srv.last_error;
+    kl_http_server_free(&srv);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(err, KL_ERR_EVENT_ADD);              /* it got past bind and listen */
+    ASSERT_EQ(port, 0);                            /* was the bound port: published at the bind */
 }
 
 /* A long download that keeps moving is not an idle connection. On a completion loop a buffered

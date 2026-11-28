@@ -378,10 +378,6 @@ int kl_http_server_run(KlHttpServer *s) {
     }
     s->listen_registered = 1;   /* the readiness listener's arm hook treats this as already armed */
 
-    /* Publish the port only now that the socket is listening, with an atomic store: another thread
-     * may poll kl_http_server_bound_port (an atomic load) until it is nonzero and then connect. */
-    kl_atomic_store_int(&s->bound_port, port);
-
     if (s->config.transport == KL_HTTP_SERVER_TRANSPORT_UNIX) {
         /* An adopted fd (socket activation) has no path we own. */
         kl_http_server_log(s, KL_HTTP_SERVER_LOG_INFO, "listening on unix:%s",
@@ -438,6 +434,12 @@ int kl_http_server_run(KlHttpServer *s) {
         }
         s->accept_via_listener = 1;
     }
+
+    /* Startup has succeeded: the socket listens and is registered with the loop, and no setup step
+     * below can fail. Publish the port only now, with an atomic store, so a nonzero port is never
+     * seen for a run that then fails to start; another thread may poll kl_http_server_bound_port (an
+     * atomic load) until it is nonzero. */
+    kl_atomic_store_int(&s->bound_port, port);
 
     int run_failed = 0;                 /* the loop stopped on an error, not on a stop */
     while (kl_atomic_load_int(&s->running)) {

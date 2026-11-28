@@ -43,12 +43,15 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   body, which on HTTP/2 left a stream that could never end.
 - Documented which thread may call `kl_http_server_stats`: the stats snapshot is a loop-thread read
   (it walks the suspended-operation list), safe elsewhere only when no run is in progress.
-- **`kl_http_server_bound_port` is safe from any thread, and nonzero means listening.** The run now
-  publishes the port with an atomic store once the socket is listening (it used to be a plain write
-  made after the bind, before `listen()`), and the function reads it with an atomic load. Polling
-  it from another thread until it is nonzero, as a test or a supervisor starting a server on its own
-  thread does, is now well defined and connects to a listening socket. Reading the `bound_port` field
-  directly from another thread is still a data race.
+- **`kl_http_server_bound_port` is safe from any thread, and nonzero means startup succeeded.** The
+  run now publishes the port with an atomic store once startup has succeeded (the socket listens and
+  is registered with the loop, and no startup step is left that can fail), and the function reads it
+  with an atomic load. It used to be a plain write made right after the bind, before `listen()`, and
+  stayed set when the start then failed. Polling it from another thread until it is nonzero, as a test
+  or a supervisor starting a server on its own thread does, is now well defined; a run that fails to
+  start never publishes a port. A nonzero value says only that startup got that far, not that the
+  server still accepts after a stop. Reading the `bound_port` field directly from another thread is
+  still a data race.
 
 ### Fixed
 

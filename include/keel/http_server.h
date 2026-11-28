@@ -291,7 +291,7 @@ typedef struct KlHttpServer {
     int  accept_alive;            /**< liveness token for slot leases; 0'd before pool teardown */
     KlSockAddr accept_pending_peer; /**< peer addr stashed for the on_accept hook (single-threaded) */
     KlSocketHandle listen_fd;              /**< Listening socket fd */
-    int bound_port;             /**< actual port once listening (useful with port=0); from another
+    int bound_port;             /**< actual port once started (useful with port=0); from another
                                  *   thread, read it only with kl_http_server_bound_port() */
     int unix_socket_owned;      /**< this server bound unix_socket_path and may unlink it */
     /* Opaque, fixed lifecycle storage for the substrate AF_UNIX node-cleanup state
@@ -551,20 +551,25 @@ KlEventCtx       *kl_http_server_event_ctx(KlHttpServer *s);
 const KlEventCtx *kl_http_server_event_ctx_const(const KlHttpServer *s);
 
 /**
- * @brief Bound TCP port the server is listening on.
+ * @brief Bound TCP port of the server's listener.
  *
- * Resolved even when the config requested an ephemeral port (port 0): after the listen socket is
- * bound this returns the actual port. Prefer this over reading `s->bound_port` directly.
+ * Resolved even when the config requested an ephemeral port (port 0): once the run has started it
+ * returns the actual port. Prefer this over reading `s->bound_port` directly.
  *
- * Ownership: none (returns a value). Lifetime: 0 until kl_http_server_run has the listener
- * listening, then the bound port, unchanged afterwards (also after the run returns). A UNIX-socket
- * server reports 0 throughout. NULL: returns -1 when @p s is NULL (deterministic).
+ * Ownership: none (returns a value). NULL: returns -1 when @p s is NULL (deterministic).
  *
- * Thread: safe from any thread. kl_http_server_run publishes the port with an atomic store once the
- * socket is listening, and this function reads it with an atomic load, so another thread may poll
- * it until it is nonzero and then connect: a nonzero value means the listener accepts connections.
- * That holds for this function only: reading the `bound_port` field directly from another thread
- * while the run starts is a data race.
+ * Value: 0 from kl_http_server_init until kl_http_server_run has finished starting up (the socket
+ * is bound, listening and registered with the loop, and no startup step is left that can fail),
+ * then the bound port. A run that fails to start never publishes a port. A UNIX-socket server
+ * reports 0 throughout. A nonzero value says only that startup got that far: it does not say the
+ * server is still accepting, since a stop or a drain may have closed the listener since; the value
+ * is not reset when that happens or when the run returns.
+ *
+ * Thread: safe from any thread between kl_http_server_init and kl_http_server_free (not after the
+ * free, nor concurrently with either). The run publishes the port with an atomic store and this
+ * function reads it with an atomic load, so another thread may poll it until it is nonzero and
+ * then connect. That holds for this function only: reading the `bound_port` field directly from
+ * another thread while the run starts is a data race.
  */
 int kl_http_server_bound_port(const KlHttpServer *s);
 
