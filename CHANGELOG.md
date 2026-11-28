@@ -114,9 +114,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   `errno`, which a provider without a hosted errno (the socket provider contract lets it report
   through `KlSocketOps.io_status` alone) does not set: a transient would-block failed the TLS session.
   They now classify the failure with the provider, as the rest of Keel does: would-block waits for
-  readiness, an interrupted call is retried at once up to four times and then reported as
-  would-block (it was fatal before, though the built-in providers already retry EINTR themselves),
-  anything else fails. Unchanged for the built-in POSIX
+  readiness, an interrupted call is retried at once (up to 16 times; a provider still interrupted
+  after that fails the call rather than waiting for a readiness edge that need not come), anything
+  else fails. An interrupted call was fatal at once before, though the built-in providers retry EINTR
+  themselves. Unchanged for the built-in POSIX
   and Winsock providers and for lwIP.
 - **UEFI EFI_TCP4 provider: a failure on a dead connection is reported as a failure.** The
   provider's `io_status` reports the status its last call published, and a send or receive on a

@@ -133,9 +133,13 @@ static int comp_ensure(unsigned char **buf, size_t *cap, size_t need,
  * surfaces as SSL_ERROR_WANT_READ/WRITE), and a 0-byte recv to a clean EOF.
  */
 
-/* Attempts a socket BIO call makes while the provider reports KL_IO_INTERRUPTED, before it
- * reports the call as retryable instead (as the datagram send path bounds the same retry). */
-#define KL_TLS_BIO_EINTR_RETRIES 4
+/* Attempts a socket BIO call makes while the provider reports KL_IO_INTERRUPTED (each retried at
+ * once, as the status asks) before it gives up and fails the call. Failing, not "retry later":
+ * an interrupted call does not mean the socket stopped being readable or writable, and Keel's
+ * readiness loops are edge-triggered (epoll EPOLLET, kqueue EV_CLEAR), so a WANT_* here could wait
+ * for an edge that never comes. A provider still interrupted after this many immediate retries is
+ * broken; the connection fails instead of stalling or spinning. */
+#define KL_TLS_BIO_EINTR_RETRIES 16
 
 static int kl_bio_write(BIO *bio, const char *buf, int len)
 {
@@ -165,8 +169,8 @@ static int kl_bio_write(BIO *bio, const char *buf, int len)
      * on Windows. The failure is classified by the provider (kl_sock_io_status),
      * never by reading errno here: a provider without a hosted errno reports
      * through its io_status op. An interrupted call is retried at once, a bounded
-     * number of times; one still interrupted after that is reported as retryable
-     * (the caller re-arms), never as fatal and never as an unbounded spin. */
+     * number of times (KL_TLS_BIO_EINTR_RETRIES); one still interrupted after that
+     * fails. */
     for (int attempt = 1; ; attempt++) {
         ssize_t ret = kl_sock_send(t->sp, t->fd, buf, n);
         if (ret >= 0)
@@ -174,7 +178,7 @@ static int kl_bio_write(BIO *bio, const char *buf, int len)
         KlIoStatus st = kl_sock_io_status(t->sp);
         if (st == KL_IO_INTERRUPTED && attempt < KL_TLS_BIO_EINTR_RETRIES)
             continue;
-        if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED)
+        if (st == KL_IO_WOULD_BLOCK)
             BIO_set_retry_write(bio);
         return -1;               /* without the retry flag: fatal */
     }
@@ -212,7 +216,7 @@ static int kl_bio_read(BIO *bio, char *buf, int len)
         KlIoStatus st = kl_sock_io_status(t->sp);
         if (st == KL_IO_INTERRUPTED && attempt < KL_TLS_BIO_EINTR_RETRIES)
             continue;
-        if (st == KL_IO_WOULD_BLOCK || st == KL_IO_INTERRUPTED)
+        if (st == KL_IO_WOULD_BLOCK)
             BIO_set_retry_read(bio);
         return -1;               /* without the retry flag: fatal */
     }

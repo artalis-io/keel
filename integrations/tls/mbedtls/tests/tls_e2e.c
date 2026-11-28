@@ -1293,13 +1293,20 @@ static unsigned   g_np_calls, g_np_wouldblock, g_np_interrupted;
 static KlIoStatus g_np_last;
 
 /* What the provider does instead of the injection pattern above. */
-enum { NP_MIXED, NP_INTERRUPTED_FOREVER, NP_FATAL, NP_EOF };
+enum { NP_MIXED, NP_PASS, NP_INTERRUPTED_N, NP_INTERRUPTED_FOREVER, NP_FATAL, NP_EOF };
 static int g_np_mode = NP_MIXED;
+static int g_np_intr_left;   /* NP_INTERRUPTED_N: calls still to interrupt, then pass through */
 
 /* 1: fail this call (-1, status in g_np_last); 2: report EOF (0); 0: do the real I/O. */
 static int np_inject(void) {
     unsigned c = g_np_calls++;
     switch (g_np_mode) {
+    case NP_PASS:
+        return 0;
+    case NP_INTERRUPTED_N:
+        if (g_np_intr_left <= 0) return 0;
+        g_np_intr_left--;
+        g_np_last = KL_IO_INTERRUPTED; g_np_interrupted++; errno = EIO; return 1;
     case NP_INTERRUPTED_FOREVER:
         g_np_last = KL_IO_INTERRUPTED; g_np_interrupted++; errno = EIO; return 1;
     case NP_FATAL:                     /* errno says "retry": only io_status may decide */
@@ -1377,42 +1384,52 @@ static void test_provider_io_status_classifies(KlAllocator *alloc, PemPair *ca, 
     printf("  PASS: handshake + round-trip classified by io_status, errno never consulted\n");
 
     char b[64];
-    /* A provider that is interrupted on every call: the BIO retries a bounded number of times,
-     * then reports the call as retryable (read/write return 0), not fatal and not a spin. The
-     * session stays usable once the provider recovers. */
-    g_np_mode = NP_INTERRUPTED_FOREVER;
-    g_np_calls = 0;
+    /* Interrupted ten times, then fine: each call is retried at once inside the BIO, so the read
+     * returns the data already waiting and the write goes out, in one call each, with no further
+     * readiness event (Keel's readiness loops are edge-triggered: a WANT_* here would wait for an
+     * edge that never comes). */
+    g_np_mode = NP_PASS;
+    assert(srv->write(srv, fds[1], "ping", 4) == 4);
+    g_np_mode = NP_INTERRUPTED_N;
+    g_np_intr_left = 10;
+    g_np_interrupted = 0;
     kl_ssize_t rr = cli->read(cli, fds[0], b, sizeof b);
-    unsigned read_calls = g_np_calls;
-    g_np_calls = 0;
-    kl_ssize_t wr = cli->write(cli, fds[0], "x", 1);
-    unsigned write_calls = g_np_calls;
-    printf("  interrupted forever: read=%zd after %u calls, write=%zd after %u calls\n",
-           (ssize_t)rr, read_calls, (ssize_t)wr, write_calls);
-    assert(rr == 0 && read_calls >= 2 && read_calls <= 8);
-    assert(wr == 0 && write_calls >= 2 && write_calls <= 8);
+    unsigned read_intr = g_np_interrupted;
+    g_np_intr_left = 10;
+    g_np_interrupted = 0;
+    kl_ssize_t wr = cli->write(cli, fds[0], "pong", 4);
+    unsigned write_intr = g_np_interrupted;
+    g_np_mode = NP_PASS;
+    printf("  interrupted 10 times: read=%zd (%u interruptions), write=%zd (%u interruptions)\n",
+           (ssize_t)rr, read_intr, (ssize_t)wr, write_intr);
+    assert(rr == 4 && memcmp(b, "ping", 4) == 0 && read_intr == 10);
+    assert(wr == 4 && write_intr == 10);
+    size_t pg = 0;
+    for (int i = 0; i < 50 && pg < 4; i++) {
+        kl_ssize_t n = srv->read(srv, fds[1], b + pg, sizeof b - pg);
+        if (n > 0) pg += (size_t)n;
+    }
+    assert(pg == 4 && memcmp(b, "pong", 4) == 0);
     g_np_mode = NP_MIXED;
-    roundtrip(srv, fds[1], cli, fds[0], "after the interruptions");
-    printf("  PASS: a provider interrupted forever is bounded and reported retryable\n");
-
-    /* A fatal provider status is fatal even when errno reads EAGAIN. */
-    g_np_mode = NP_FATAL;
-    rr = cli->read(cli, fds[0], b, sizeof b);
-    assert(rr == -1 && !cli->at_eof(cli));
-    wr = cli->write(cli, fds[0], "x", 1);
-    assert(wr == -1);
-    printf("  PASS: KL_IO_FATAL fails read and write (errno EAGAIN ignored)\n");
-    g_np_mode = NP_MIXED;
+    printf("  PASS: interrupted calls are retried at once; the operation completes in the same call\n");
 
     cli->destroy(cli);
     srv->destroy(srv);
     close(fds[0]);
     close(fds[1]);
 
-    /* EOF semantics through the same provider, on a fresh pair: a close_notify followed by the
-     * transport's EOF is a clean close (read -1, at_eof 1); a bare EOF (recv 0, no close_notify) is
-     * a truncation (read -1, at_eof 0). */
-    for (int bare = 0; bare <= 1; bare++) {
+    /* The rest on a fresh pair each, through the same provider:
+     *   close_notify then the transport's EOF: a clean close (read -1, at_eof 1);
+     *   a bare EOF (recv 0, no close_notify): a truncation (read -1, at_eof 0);
+     *   KL_IO_FATAL with errno reading EAGAIN: read and write fail (-1), errno ignored;
+     *   a provider interrupted forever: the read, and the write, fail (-1) after exactly
+     *   KL_TLS_BIO_EINTR_RETRIES (16) immediate attempts: no spin, no wait for an edge. */
+    enum { C_NOTIFY, C_BARE, C_FATAL, C_INTR_READ, C_INTR_WRITE, C_COUNT };
+    static const char *const cname[C_COUNT] = { "close_notify", "bare EOF", "fatal",
+                                                "interrupted forever (read)",
+                                                "interrupted forever (write)" };
+    for (int c = 0; c < C_COUNT; c++) {
+        g_np_mode = NP_MIXED;
         srv = kl_tls_mbedtls_create(sctx, alloc);
         cli = kl_tls_mbedtls_create(cctx, alloc);
         assert(srv && cli);
@@ -1422,26 +1439,43 @@ static void test_provider_io_status_classifies(KlAllocator *alloc, PemPair *ca, 
         assert(socketpair(AF_UNIX, SOCK_STREAM, 0, fds) == 0);
         assert(nonblock(fds[0]) == 0 && nonblock(fds[1]) == 0);
         assert(drive_handshake(cli, fds[0], srv, fds[1]) == 0);
-        roundtrip(srv, fds[1], cli, fds[0], "before the close");
-        if (bare) {
-            g_np_mode = NP_EOF;
-        } else {
+        roundtrip(srv, fds[1], cli, fds[0], "before the case");
+        kl_ssize_t n = 0;
+        int eof = 0;
+        unsigned calls = 0;
+        if (c == C_NOTIFY) {
             for (int i = 0; i < 20 && srv->shutdown(srv, fds[1]) != KL_TLS_OK; i++) { }
             shutdown(fds[1], SHUT_WR);
+            for (int i = 0; i < 50 && (n = cli->read(cli, fds[0], b, sizeof b)) == 0; i++) { }
+            eof = cli->at_eof(cli);
+            assert(n == -1 && eof == 1);
+        } else if (c == C_BARE) {
+            g_np_mode = NP_EOF;
+            for (int i = 0; i < 50 && (n = cli->read(cli, fds[0], b, sizeof b)) == 0; i++) { }
+            eof = cli->at_eof(cli);
+            assert(n == -1 && eof == 0);
+        } else if (c == C_FATAL) {
+            g_np_mode = NP_FATAL;
+            n = cli->read(cli, fds[0], b, sizeof b);
+            assert(n == -1 && !cli->at_eof(cli));
+            kl_ssize_t w2 = cli->write(cli, fds[0], "x", 1);
+            assert(w2 == -1);
+        } else {
+            g_np_mode = NP_INTERRUPTED_FOREVER;
+            g_np_calls = 0;
+            n = c == C_INTR_READ ? cli->read(cli, fds[0], b, sizeof b)
+                                 : cli->write(cli, fds[0], "x", 1);
+            calls = g_np_calls;
+            assert(n == -1 && calls == 16);
         }
-        kl_ssize_t n = 0;
-        for (int i = 0; i < 50 && (n = cli->read(cli, fds[0], b, sizeof b)) == 0; i++) { }
-        int eof = cli->at_eof(cli);
         g_np_mode = NP_MIXED;
-        printf("  %s: read=%zd at_eof=%d\n", bare ? "bare EOF" : "close_notify", (ssize_t)n, eof);
-        assert(n == -1);
-        assert(eof == (bare ? 0 : 1));
+        printf("  %s: result %zd, at_eof %d, provider calls %u\n", cname[c], (ssize_t)n, eof, calls);
         cli->destroy(cli);
         srv->destroy(srv);
         close(fds[0]);
         close(fds[1]);
     }
-    printf("  PASS: close_notify is a clean EOF, a bare EOF is a truncation\n");
+    printf("  PASS: clean and bare EOF, fatal, and a provider interrupted forever classify as before\n");
     kl_tls_mbedtls_ctx_destroy(sctx);
     kl_tls_mbedtls_ctx_destroy(cctx);
 }
