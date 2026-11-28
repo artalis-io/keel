@@ -248,6 +248,11 @@ const KlEventProvider *kl_event_provider_lwip_raw(void) { return &lwip_raw_event
  * host shutdown() on a value that is not a host descriptor. */
 static int lwr_sock_shutdown(void *c, KlSocketHandle fd, KlShutdownHow how) {
     (void)c; (void)fd; (void)how;
+#ifdef ENOTSUP
+    errno = ENOTSUP;
+#else
+    errno = EOPNOTSUPP;
+#endif
     return -1;
 }
 static int lwr_sock_noop_fd(void *c, KlSocketHandle fd) { (void)c; (void)fd; return 0; }
@@ -268,11 +273,16 @@ static KlSocketHandle lwr_sock_socket(void *c, int d, int t, int p) {
  * unsupported-family fail-early gate. */
 static int lwr_sock_bind(void *c, KlSocketHandle fd, const KlSockAddr *a) {
     (void)c;
-    if (!a || kl_sockaddr_family(a) != KL_AF_INET) return -1;   /* IPv6 unsupported */
+    if (!a || kl_sockaddr_family(a) != KL_AF_INET) {   /* IPv6 unsupported */
+        errno = EINVAL;
+        return -1;
+    }
     /* Route a datagram handle to udp_bind, a stream handle to tcp_bind. */
-    if (kl_lwr_is_udp(kl_lwr_active_ctx(), (void *)fd))
-        return kl_lwr_udp_bind((void *)fd, a->u.ip, kl_sockaddr_port(a));
-    return kl_lwr_tcp_bind((void *)fd, a->u.ip, kl_sockaddr_port(a));
+    int r = kl_lwr_is_udp(kl_lwr_active_ctx(), (void *)fd)
+                ? kl_lwr_udp_bind((void *)fd, a->u.ip, kl_sockaddr_port(a))
+                : kl_lwr_tcp_bind((void *)fd, a->u.ip, kl_sockaddr_port(a));
+    if (r < 0) errno = EIO;                            /* lwIP's err_t does not reach errno */
+    return r;
 }
 
 /* connect: UNSUPPORTED. lwip-raw is a SERVER-ONLY backend; no outbound connect. Fail EARLY
@@ -316,7 +326,7 @@ static int lwr_sock_close(void *c, KlSocketHandle fd) {
 
 static int lwr_sock_getaddr(void *c, KlSocketHandle fd, KlSockAddr *out) {
     (void)c;
-    if (!out || !kl_handle_valid(fd)) return -1;
+    if (!out || !kl_handle_valid(fd)) { errno = EIO; return -1; }   /* a failure, never a stale errno */
     /* Datagram handle → udp local port; stream handle → tcp local port. */
     uint16_t port = kl_lwr_is_udp(kl_lwr_active_ctx(), (void *)fd)
                         ? kl_lwr_udp_local_port((void *)fd)
@@ -383,7 +393,7 @@ static kl_ssize_t lwr_sock_recv(void *c, KlSocketHandle fd, void *b, size_t n) {
 
 /* recv_peek is unused by the async client (io_read uses .recv). Keep it a hard error. */
 static kl_ssize_t lwr_sock_io(void *c, KlSocketHandle fd, void *b, size_t n) {
-    (void)c; (void)fd; (void)b; (void)n; return -1;
+    (void)c; (void)fd; (void)b; (void)n; return lwr_io_fail();
 }
 
 /* ── Datagram data-plane (KlDatagramOps) ────────────────────────────────────

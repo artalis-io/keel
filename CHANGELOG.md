@@ -127,8 +127,10 @@ Keel follows Semantic Versioning (the compatibility contract is in `docs/contrac
   would-block, so a caller classifying by `io_status` (the TLS adapters now do) re-armed a dead
   connection until a deadline. Every failure now publishes a fatal status, and a latched receive
   error is never published as retryable.
-- **lwIP raw provider:** a hard send or receive failure now sets `errno` (EIO); it left `errno`
-  as the previous call set it, which could read as a would-block.
+- **lwIP raw provider:** every failing socket op now sets `errno` (send, receive, peek, local
+  address and bind: EIO or EINVAL; shutdown: ENOTSUP); they left `errno` as the previous call set
+  it, which could read as a would-block. The EFI_TCP4 provider's local-address call likewise
+  publishes its own failure for a bad argument.
 
 ## [3.6.0]
 

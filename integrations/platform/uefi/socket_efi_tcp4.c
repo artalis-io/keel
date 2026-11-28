@@ -1062,7 +1062,8 @@ static int efi_sock_get_local_addr(void *cx, KlSocketHandle fd, KlSockAddr *addr
     (void)cx;
     if (kl_uefi_after_ebs()) return -1;   /* fail-closed post-EBS */
     KlUefiConn *c = conn_of(fd);
-    if (!c || c->dead || !addr || !c->tcp) return -1;
+    if (!c || c->dead) return -1;          /* no live conn: the wrapper publishes EFI_ABORTED */
+    if (!addr || !c->tcp) { c->last_status = EFI_INVALID_PARAMETER; return -1; }
 
     EFI_TCP4_CONFIG_DATA mode;
     { unsigned char *p = (unsigned char *)&mode; for (size_t i = 0; i < sizeof(mode); i++) p[i] = 0; }

@@ -112,7 +112,9 @@ static int       g_event_count;
  * UDP) we can script whether submitting the token immediately completes (signals its
  * event with a chosen status) or HANGS (leaves the event unsignaled → the provider's
  * pump times out → pump_or_cancel must Cancel+drain). */
-typedef enum { TOK_COMPLETE_OK, TOK_HANG } TokMode;
+typedef enum { TOK_COMPLETE_OK, TOK_HANG, TOK_COMPLETE_ERR } TokMode;
+/* TOK_COMPLETE_ERR (Receive only): the token completes at once with this status. */
+static EFI_STATUS g_tcp_receive_err = EFI_TIMEOUT;
 
 static TokMode  g_tcp_connect_mode  = TOK_COMPLETE_OK;
 static TokMode  g_tcp_transmit_mode = TOK_COMPLETE_OK;
@@ -408,6 +410,8 @@ static EFI_STATUS EFIAPI m_tcp_Receive(EFI_TCP4_PROTOCOL *This, EFI_TCP4_IO_TOKE
             rx->DataLength = g_tcp_rx_datalen_override ? g_tcp_rx_datalen_override : 4;
         }
         t->CompletionToken.Status = EFI_SUCCESS; e->signaled = 1; tok_terminal(&t->CompletionToken);
+    } else if (g_tcp_receive_mode == TOK_COMPLETE_ERR) {
+        t->CompletionToken.Status = g_tcp_receive_err; e->signaled = 1; tok_terminal(&t->CompletionToken);
     }
     return EFI_SUCCESS;
 }
@@ -1097,6 +1101,43 @@ static void t_cancel_fails_quarantine(void) {
     CHECK(kl_handle_valid(fd2), "a fresh slot is still available");
     CHECK(fd2 != fd, "F1: quarantined slot is NOT reused for the new socket");
     g_cancel_signals = 1;   /* restore */
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * A Receive that completes with an error ends the stream: recv reports it (-1, errno EIO) and
+ * io_status must say fatal even when the firmware's code would read as transient (EFI_TIMEOUT maps
+ * to would-block). A get_local_addr refused for a bad argument publishes its own failure too.
+ * ───────────────────────────────────────────────────────────────────────────── */
+static void t_io_status_after_a_receive_error(void) {
+    T_CASE("io_status: a Receive completed with EFI_TIMEOUT is fatal; a refused get_local_addr too");
+    char buf[8];
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK;
+    g_tcp_receive_mode = TOK_HANG;
+    g_tcp_close_mode   = TOK_COMPLETE_OK;
+    const KlSocketProvider *p = fresh_provider();
+    KlSocketHandle fd = p->ops->socket(p->context, 2, 1, 0);
+    KlSockAddr a; mk_addr(&a);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connect_now ok");
+    CHECK(p->ops->recv(p->context, fd, buf, 1) == -1, "recv with nothing received: -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_WOULD_BLOCK, "... classified would-block");
+    CHECK(p->ops->get_local_addr(p->context, fd, NULL) == -1, "get_local_addr(NULL): -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_FATAL, "... io_status fatal, not the would-block");
+    p->ops->close(p->context, fd);
+
+    reset_counters();
+    g_tcp_connect_mode = TOK_COMPLETE_OK;
+    g_tcp_receive_mode = TOK_COMPLETE_ERR;
+    g_tcp_receive_err  = EFI_TIMEOUT;
+    p = fresh_provider();
+    fd = p->ops->socket(p->context, 2, 1, 0);
+    kl_uefi_socket_configure(fd, &a);
+    CHECK(kl_uefi_socket_connect_now(fd) == 0, "connect_now ok");
+    CHECK(p->ops->recv(p->context, fd, buf, sizeof buf) == -1, "recv on a Receive that failed: -1");
+    CHECK(p->ops->io_status(p->context) == KL_IO_FATAL, "... io_status fatal (not would-block)");
+    p->ops->close(p->context, fd);
+    g_tcp_receive_mode = TOK_COMPLETE_OK;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -3252,6 +3293,7 @@ int main(void) {
     t_stale_guard_no_uaf();
     t_cancel_fails_quarantine();
     t_io_status_after_failure_on_a_gone_conn();
+    t_io_status_after_a_receive_error();
     t_close_no_spin_on_consumed_connect();
     t_bad_rx_length();
     /* Server accept-lifetime (verifies bind/listen/accept + post_accept).
